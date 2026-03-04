@@ -14,6 +14,8 @@ dependencies = [
     "pydantic>=2.6",
     "lap>=0.5.12",
     "sahi>=0.11",
+    "plotly>=5.18",
+    "scipy>=1.12",
 ]
 
 [project.optional-dependencies]

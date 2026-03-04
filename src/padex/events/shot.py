@@ -221,6 +221,192 @@ class ServeOnlyShotTypeClassifier(ShotTypeClassifier):
 
 
 # ---------------------------------------------------------------------------
+# Pose-based shot type classifier
+# ---------------------------------------------------------------------------
+
+
+class PoseBasedShotTypeClassifier(ShotTypeClassifier):
+    """Classifies shot types using player pose keypoints + ball trajectory.
+
+    Uses rule-based heuristics based on:
+    - Wrist height relative to shoulders (overhead vs low)
+    - Player court position (net vs baseline)
+    - Ball trajectory (wall bounces, direction)
+    """
+
+    NET_ZONE_Y = 13.0
+    NET_Y = 10.0
+    MIN_KP_CONF = 0.3
+
+    def classify(
+        self,
+        contact: ContactEvent,
+        ball_frames_after: list[BallFrame],
+        keypoints: list[PoseKeypoint],
+    ) -> tuple[ShotType, float]:
+        if not keypoints:
+            return (ShotType.UNKNOWN, 0.3)
+
+        kp_map = {
+            kp.name: kp for kp in keypoints if kp.confidence >= self.MIN_KP_CONF
+        }
+
+        required = [
+            "left_shoulder",
+            "right_shoulder",
+            "left_wrist",
+            "right_wrist",
+        ]
+        if not all(k in kp_map for k in required):
+            return (ShotType.UNKNOWN, 0.3)
+
+        # In pixel coords: lower y = higher on screen = overhead
+        wrist_y = min(kp_map["left_wrist"].y, kp_map["right_wrist"].y)
+        shoulder_y = min(
+            kp_map["left_shoulder"].y, kp_map["right_shoulder"].y
+        )
+        wrist_above_shoulder = wrist_y < shoulder_y
+
+        player_pos = contact.player_position or contact.ball_position
+        at_net = (
+            player_pos.y >= (self.NET_Y - 3.0)
+            and player_pos.y <= self.NET_ZONE_Y
+        )
+
+        has_wall_bounce = self._has_wall_bounce(ball_frames_after)
+
+        # --- Rule chain ---
+        if at_net:
+            if wrist_above_shoulder:
+                wrist_diff = shoulder_y - wrist_y
+                if wrist_diff > 50:
+                    if self._is_exit_smash(ball_frames_after):
+                        return (ShotType.SMASH_X3, 0.6)
+                    return (ShotType.SMASH, 0.7)
+                if self._has_side_spin(kp_map):
+                    return (ShotType.VIBORA, 0.6)
+                return (ShotType.BANDEJA, 0.65)
+
+            if self._is_short_trajectory(ball_frames_after):
+                return (ShotType.DROP_SHOT, 0.6)
+            return (ShotType.VOLLEY, 0.65)
+
+        # Baseline play
+        if wrist_above_shoulder:
+            if self._is_lob_trajectory(ball_frames_after):
+                return (ShotType.LOB, 0.6)
+            return (ShotType.BAJADA, 0.55)
+
+        if has_wall_bounce:
+            if self._is_contra_pared(contact):
+                return (ShotType.CONTRA_PARED, 0.55)
+            return (ShotType.WALL_RETURN, 0.6)
+
+        if self._is_chiquita(contact, ball_frames_after):
+            return (ShotType.CHIQUITA, 0.55)
+
+        if self._is_forehand(kp_map):
+            return (ShotType.GROUNDSTROKE_FH, 0.6)
+        return (ShotType.GROUNDSTROKE_BH, 0.6)
+
+    @staticmethod
+    def _is_forehand(kp_map: dict[str, PoseKeypoint]) -> bool:
+        l_wrist = kp_map.get("left_wrist")
+        r_wrist = kp_map.get("right_wrist")
+        l_hip = kp_map.get("left_hip")
+        r_hip = kp_map.get("right_hip")
+        if not (l_wrist and r_wrist):
+            return True
+        if l_hip and r_hip:
+            body_cx = (l_hip.x + r_hip.x) / 2
+            return abs(r_wrist.x - body_cx) > abs(l_wrist.x - body_cx)
+        return True
+
+    @staticmethod
+    def _has_wall_bounce(ball_frames_after: list[BallFrame]) -> bool:
+        for bf in ball_frames_after[:15]:
+            if bf.position is None:
+                continue
+            if bf.position.x < 1.0 or bf.position.x > 9.0:
+                return True
+            if bf.position.y < 1.0 or bf.position.y > 19.0:
+                return True
+        return False
+
+    @staticmethod
+    def _has_side_spin(kp_map: dict[str, PoseKeypoint]) -> bool:
+        l_elbow = kp_map.get("left_elbow")
+        r_elbow = kp_map.get("right_elbow")
+        l_wrist = kp_map.get("left_wrist")
+        r_wrist = kp_map.get("right_wrist")
+        if not (l_elbow and r_elbow and l_wrist and r_wrist):
+            return False
+        l_lateral = abs(l_wrist.x - l_elbow.x)
+        r_lateral = abs(r_wrist.x - r_elbow.x)
+        return max(l_lateral, r_lateral) > 40
+
+    @staticmethod
+    def _is_short_trajectory(ball_frames_after: list[BallFrame]) -> bool:
+        positions = [
+            bf.position
+            for bf in ball_frames_after[:10]
+            if bf.position is not None
+        ]
+        if len(positions) < 2:
+            return False
+        total_dist = sum(
+            np.sqrt(
+                (positions[i].x - positions[i - 1].x) ** 2
+                + (positions[i].y - positions[i - 1].y) ** 2
+            )
+            for i in range(1, len(positions))
+        )
+        return total_dist < 2.0
+
+    @staticmethod
+    def _is_lob_trajectory(ball_frames_after: list[BallFrame]) -> bool:
+        positions = [
+            bf.position
+            for bf in ball_frames_after[:15]
+            if bf.position is not None
+        ]
+        if len(positions) < 3:
+            return False
+        return abs(positions[-1].y - positions[0].y) > 3.0
+
+    @staticmethod
+    def _is_exit_smash(ball_frames_after: list[BallFrame]) -> bool:
+        for bf in ball_frames_after[:20]:
+            if bf.position is None:
+                continue
+            if bf.position.y < 0.5 or bf.position.y > 19.5:
+                return True
+            if bf.position.x < 0.5 or bf.position.x > 9.5:
+                return True
+        return False
+
+    @staticmethod
+    def _is_contra_pared(contact: ContactEvent) -> bool:
+        player_pos = contact.player_position or contact.ball_position
+        return player_pos.y < 2.0 or player_pos.y > 18.0
+
+    @staticmethod
+    def _is_chiquita(
+        contact: ContactEvent, ball_frames_after: list[BallFrame]
+    ) -> bool:
+        positions = [
+            bf.position
+            for bf in ball_frames_after[:10]
+            if bf.position is not None
+        ]
+        if len(positions) < 2:
+            return False
+        player_pos = contact.player_position or contact.ball_position
+        ball_end = positions[-1]
+        return abs(ball_end.y - 10.0) < abs(player_pos.y - 10.0)
+
+
+# ---------------------------------------------------------------------------
 # ShotDetector facade
 # ---------------------------------------------------------------------------
 
@@ -286,14 +472,17 @@ class ShotDetector:
                 if contact.timestamp_ms <= (b.timestamp_ms or 0) < next_ts
             ]
 
-            # Classify
+            # Classify — find keypoints for the contact player at contact frame
             ball_after = [
                 bf
                 for bf in ball_frames
                 if bf.timestamp_ms >= contact.timestamp_ms
             ][:30]
+            contact_kps = self._find_keypoints(
+                player_frames, contact.player_id, contact.frame_id
+            )
             shot_type, conf = self.shot_type_classifier.classify(
-                contact, ball_after, []
+                contact, ball_after, contact_kps
             )
 
             shot_id = (
@@ -317,10 +506,14 @@ class ShotDetector:
 
         return shots
 
-    def classify(
-        self,
-        shot: Shot,
-        keypoints: list[PoseKeypoint],
-    ) -> ShotType:
-        """Re-classify an existing shot (Phase 3 hook)."""
-        raise NotImplementedError("Pose-based classification is Phase 3")
+    @staticmethod
+    def _find_keypoints(
+        player_frames: list[PlayerFrame],
+        player_id: str,
+        frame_id: int,
+    ) -> list[PoseKeypoint]:
+        """Find keypoints for a specific player at a specific frame."""
+        for pf in player_frames:
+            if pf.player_id == player_id and pf.frame_id == frame_id:
+                return pf.keypoints
+        return []

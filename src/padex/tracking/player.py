@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-from padex.schemas.tracking import BoundingBox, PlayerFrame, Position2D
+from padex.schemas.tracking import BoundingBox, PlayerFrame, PoseKeypoint, Position2D
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +82,28 @@ class TeamClassifier(abc.ABC):
     @abc.abstractmethod
     def reset(self) -> None:
         """Reset classifier state."""
+        ...
+
+
+class PoseEstimationStrategy(abc.ABC):
+    """Abstract interface for pose estimation backends."""
+
+    @abc.abstractmethod
+    def estimate(
+        self,
+        frame: np.ndarray,
+        bboxes: list[BoundingBox],
+    ) -> list[list[PoseKeypoint]]:
+        """Estimate pose keypoints for each bbox.
+
+        Returns a list of keypoint lists (one per bbox, in same order).
+        Empty list for a bbox if estimation failed.
+        """
+        ...
+
+    @abc.abstractmethod
+    def reset(self) -> None:
+        """Reset estimator state."""
         ...
 
 
@@ -315,6 +337,129 @@ class JerseyColorTeamClassifier(TeamClassifier):
 
 
 # ---------------------------------------------------------------------------
+# YOLO-Pose estimation strategy
+# ---------------------------------------------------------------------------
+
+
+class YoloPoseEstimationStrategy(PoseEstimationStrategy):
+    """Pose estimation using YOLO-Pose model (yolo26m-pose.pt).
+
+    Extracts 17 COCO keypoints per detected person.
+    """
+
+    COCO_KEYPOINT_NAMES = [
+        "nose",
+        "left_eye",
+        "right_eye",
+        "left_ear",
+        "right_ear",
+        "left_shoulder",
+        "right_shoulder",
+        "left_elbow",
+        "right_elbow",
+        "left_wrist",
+        "right_wrist",
+        "left_hip",
+        "right_hip",
+        "left_knee",
+        "right_knee",
+        "left_ankle",
+        "right_ankle",
+    ]
+
+    def __init__(
+        self,
+        model_path: str = "yolo26m-pose.pt",
+        confidence_threshold: float = 0.3,
+        device: str | None = None,
+        imgsz: int = 640,
+    ) -> None:
+        self.model_path = model_path
+        self.confidence_threshold = confidence_threshold
+        self.device = device
+        self.imgsz = imgsz
+        self._model = None
+
+    def _ensure_model(self):
+        if self._model is None:
+            from ultralytics import YOLO
+
+            self._model = YOLO(self.model_path)
+
+    def estimate(
+        self,
+        frame: np.ndarray,
+        bboxes: list[BoundingBox],
+    ) -> list[list[PoseKeypoint]]:
+        if not bboxes:
+            return []
+
+        self._ensure_model()
+
+        results = self._model.predict(
+            frame,
+            conf=self.confidence_threshold,
+            verbose=False,
+            device=self.device,
+            imgsz=self.imgsz,
+        )
+
+        if not results or results[0].keypoints is None:
+            return [[] for _ in bboxes]
+
+        # Parse all pose detections from YOLO-Pose
+        det_keypoints = results[0].keypoints
+        det_boxes = results[0].boxes
+        if det_boxes is None:
+            return [[] for _ in bboxes]
+
+        det_xyxy = det_boxes.xyxy.cpu().numpy()
+        kpts_xy = det_keypoints.xy.cpu().numpy()  # (N, 17, 2)
+        kpts_conf = det_keypoints.conf.cpu().numpy()  # (N, 17)
+
+        # Match each input bbox to the closest YOLO-Pose detection
+        result: list[list[PoseKeypoint]] = []
+        for bbox in bboxes:
+            bcx = (bbox.x1 + bbox.x2) / 2.0
+            bcy = (bbox.y1 + bbox.y2) / 2.0
+
+            best_idx = -1
+            best_dist = float("inf")
+            for j in range(len(det_xyxy)):
+                dcx = (det_xyxy[j][0] + det_xyxy[j][2]) / 2.0
+                dcy = (det_xyxy[j][1] + det_xyxy[j][3]) / 2.0
+                dist = (bcx - dcx) ** 2 + (bcy - dcy) ** 2
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = j
+
+            if best_idx < 0:
+                result.append([])
+                continue
+
+            kp_list: list[PoseKeypoint] = []
+            for k in range(len(self.COCO_KEYPOINT_NAMES)):
+                x_val = float(kpts_xy[best_idx, k, 0])
+                y_val = float(kpts_xy[best_idx, k, 1])
+                c_val = float(kpts_conf[best_idx, k])
+                if c_val > 0.0:
+                    kp_list.append(
+                        PoseKeypoint(
+                            name=self.COCO_KEYPOINT_NAMES[k],
+                            x=x_val,
+                            y=y_val,
+                            confidence=c_val,
+                        )
+                    )
+            result.append(kp_list)
+
+        return result
+
+    def reset(self) -> None:
+        self._model = None
+
+
+# ---------------------------------------------------------------------------
 # PlayerDetector facade
 # ---------------------------------------------------------------------------
 
@@ -333,6 +478,7 @@ class PlayerDetector:
         self,
         detection_strategy: PlayerDetectionStrategy | None = None,
         team_classifier: TeamClassifier | None = None,
+        pose_strategy: PoseEstimationStrategy | None = None,
         model_path: str = "yolo26m.pt",
         confidence_threshold: float = 0.5,
     ) -> None:
@@ -341,6 +487,7 @@ class PlayerDetector:
             confidence_threshold=confidence_threshold,
         )
         self.team_classifier = team_classifier or JerseyColorTeamClassifier()
+        self.pose_strategy = pose_strategy
 
     def detect(
         self,
@@ -374,6 +521,8 @@ class PlayerDetector:
         """Reset tracker and classifier state for a new video/scene."""
         self.detection_strategy.reset_tracking()
         self.team_classifier.reset()
+        if self.pose_strategy is not None:
+            self.pose_strategy.reset()
 
     # -- Private helpers ---------------------------------------------------
 
@@ -410,7 +559,13 @@ class PlayerDetector:
         dets_for_classify = [t[0] for t in positioned]
         team_map = self.team_classifier.classify(dets_for_classify, frame)
 
-        # 4. Build PlayerFrame objects
+        # 4. Pose estimation (optional)
+        pose_results: list[list[PoseKeypoint]] | None = None
+        if self.pose_strategy is not None:
+            bboxes = [det.bbox for det, _ in positioned]
+            pose_results = self.pose_strategy.estimate(frame, bboxes)
+
+        # 5. Build PlayerFrame objects
         player_frames: list[PlayerFrame] = []
         for i, (det, pos) in enumerate(positioned):
             if det.track_id is not None:
@@ -419,6 +574,7 @@ class PlayerDetector:
                 player_id = f"P_det_{i:03d}"
 
             team_id = team_map.get(i)
+            keypoints = pose_results[i] if pose_results and i < len(pose_results) else []
 
             player_frames.append(
                 PlayerFrame(
@@ -429,7 +585,7 @@ class PlayerDetector:
                     bbox=det.bbox,
                     position=pos,
                     confidence=det.confidence,
-                    keypoints=[],
+                    keypoints=keypoints,
                 )
             )
 
