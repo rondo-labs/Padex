@@ -252,7 +252,7 @@ class KalmanBallTracker(BallTracker):
 
         # Gate: reject detections far from prediction
         prediction = self._kf.predict()
-        pred_x, pred_y = float(prediction[0]), float(prediction[1])
+        pred_x, pred_y = float(prediction[0, 0]), float(prediction[1, 0])
         dist = np.sqrt((pred_x - x_m) ** 2 + (pred_y - y_m) ** 2)
         if dist > self.GATE_DISTANCE_M:
             # Ghost detection (glass reflection) — use prediction instead
@@ -266,7 +266,7 @@ class KalmanBallTracker(BallTracker):
         measurement = np.array([[x_m], [y_m]], dtype=np.float32)
         corrected = self._kf.correct(measurement)
         self._occluded_count = 0
-        cx, cy = float(corrected[0]), float(corrected[1])
+        cx, cy = float(corrected[0, 0]), float(corrected[1, 0])
         return self._clamp_to_court(cx, cy), BallVisibility.VISIBLE
 
     def reset(self) -> None:
@@ -285,7 +285,7 @@ class KalmanBallTracker(BallTracker):
             self.reset()
             return None, BallVisibility.OCCLUDED
 
-        x, y = float(prediction[0]), float(prediction[1])
+        x, y = float(prediction[0, 0]), float(prediction[1, 0])
         return self._clamp_to_court(x, y), BallVisibility.INFERRED
 
     def _bbox_center_to_court(
