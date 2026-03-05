@@ -23,7 +23,7 @@ class CourtRenderer:
     COURT_WIDTH = 10.0
     COURT_LENGTH = 20.0
     NET_Y = 10.0
-    SERVICE_LINE_OFFSET = 3.0  # 3m from each end
+    SERVICE_LINE_OFFSET = 7.0  # 7m from net
 
     # Court line coordinates
     _SERVICE_Y_NEAR = 3.0

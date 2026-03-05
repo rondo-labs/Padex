@@ -234,7 +234,7 @@ class PoseBasedShotTypeClassifier(ShotTypeClassifier):
     - Ball trajectory (wall bounces, direction)
     """
 
-    NET_ZONE_Y = 13.0
+    NET_ZONE_Y = 17.0
     NET_Y = 10.0
     MIN_KP_CONF = 0.3
 

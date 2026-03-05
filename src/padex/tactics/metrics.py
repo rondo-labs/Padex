@@ -46,7 +46,7 @@ _DEFENSE_TYPES = {
     ShotType.CONTRA_PARED,
 }
 
-NET_ZONE_THRESHOLD = 13.0  # y < 13 = net zone
+NET_ZONE_THRESHOLD = 17.0  # y < 17 = net zone (service line)
 
 
 class MetricsCalculator:
@@ -276,7 +276,7 @@ class MetricsCalculator:
                 pass
             if any(
                 pf.position is not None
-                and 7.0 <= pf.position.y <= 13.0
+                and 3.0 <= pf.position.y <= 17.0
                 for pf in pfs
             ):
                 net_frames += 1
