@@ -1,0 +1,19 @@
+# Padel match video URLs for court keypoint training data
+# One URL per line. Lines starting with # are comments.
+# Goal: diverse courts, venues, camera angles, lighting conditions.
+#
+# Usage:
+#   brew install yt-dlp  (if not installed)
+#   uv run python scripts/batch_collect_frames.py scripts/video_urls.txt
+
+# --- Premier Padel / World Padel Tour ---
+# (Add URLs here)
+
+# --- A1 Padel ---
+# (Add URLs here)
+
+# --- FIP Tour ---
+# (Add URLs here)
+
+# --- National leagues / Amateur ---
+# (Add URLs here)

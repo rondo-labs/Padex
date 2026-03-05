@@ -5,11 +5,12 @@ Author: Xingnan Zhu
 File Name: extract_frames.py
 Description:
     Extract frames from padel match videos for court keypoint annotation.
-    Filters out near-duplicate frames and non-court frames (replays, closeups, etc.).
+    Filters out near-duplicate frames, non-court frames, and frames without
+    enough players detected (requires YOLO).
 
 Usage:
     python scripts/extract_frames.py assets/raw/video/match.mp4 -o data/frames/match
-    python scripts/extract_frames.py assets/raw/video/match.mp4 --interval 5 --min-similarity 0.92
+    python scripts/extract_frames.py assets/raw/video/match.mp4 --interval 5 --min-players 4
 """
 
 from __future__ import annotations
@@ -78,12 +79,42 @@ def is_court_frame(frame: np.ndarray) -> bool:
     return court_ratio > 0.15
 
 
+def load_player_detector(device: str | None = None):
+    """Load YOLO model for player detection."""
+    from ultralytics import YOLO
+
+    model_path = PROJECT_ROOT / "assets" / "weights" / "yolo26m.pt"
+    if not model_path.exists():
+        logger.error("YOLO weights not found: %s", model_path)
+        sys.exit(1)
+
+    model = YOLO(str(model_path))
+    return model
+
+
+def count_players(model, frame: np.ndarray, device: str | None = None) -> int:
+    """Count the number of persons detected by YOLO in a frame."""
+    PERSON_CLASS_ID = 0
+    results = model.predict(
+        frame,
+        conf=0.5,
+        classes=[PERSON_CLASS_ID],
+        verbose=False,
+        device=device,
+    )
+    if results and results[0].boxes is not None:
+        return len(results[0].boxes)
+    return 0
+
+
 def extract_frames(
     video_path: Path,
     output_dir: Path,
     interval_sec: float = 3.0,
     min_similarity: float = 0.93,
     max_frames: int = 500,
+    min_players: int = 4,
+    device: str | None = None,
 ) -> int:
     """Extract diverse court-view frames from a video.
 
@@ -93,6 +124,8 @@ def extract_frames(
         interval_sec: Minimum seconds between sampled frames.
         min_similarity: Histogram correlation threshold for dedup (higher = stricter).
         max_frames: Maximum number of frames to extract.
+        min_players: Minimum number of players detected to keep a frame.
+        device: Inference device for YOLO (None = auto-detect).
 
     Returns:
         Number of frames extracted.
@@ -111,11 +144,19 @@ def extract_frames(
 
     logger.info("Video: %s", video_path.name)
     logger.info("FPS: %.1f | Total frames: %d | Duration: %.1fs", fps, total_frames, duration_sec)
-    logger.info("Sampling every %.1fs (%d frames) | Dedup threshold: %.2f", interval_sec, frame_step, min_similarity)
+    logger.info(
+        "Sampling every %.1fs (%d frames) | Dedup threshold: %.2f | Min players: %d",
+        interval_sec, frame_step, min_similarity, min_players,
+    )
+
+    # Load YOLO for player detection
+    logger.info("Loading YOLO model for player detection...")
+    yolo_model = load_player_detector()
 
     saved_count = 0
     skipped_similar = 0
     skipped_no_court = 0
+    skipped_few_players = 0
     saved_histograms: list[np.ndarray] = []
     video_stem = video_path.stem
 
@@ -132,7 +173,14 @@ def extract_frames(
             frame_id += frame_step
             continue
 
-        # Filter 2: Is this frame different enough from already saved frames?
+        # Filter 2: Are there enough players visible?
+        n_players = count_players(yolo_model, frame, device=device)
+        if n_players < min_players:
+            skipped_few_players += 1
+            frame_id += frame_step
+            continue
+
+        # Filter 3: Is this frame different enough from already saved frames?
         hist = compute_histogram(frame)
         is_dup = any(is_similar(hist, saved_hist, min_similarity) for saved_hist in saved_histograms)
 
@@ -159,7 +207,10 @@ def extract_frames(
 
     logger.info("--- Results ---")
     logger.info("Saved: %d frames to %s", saved_count, output_dir)
-    logger.info("Skipped (no court): %d | Skipped (similar): %d", skipped_no_court, skipped_similar)
+    logger.info(
+        "Skipped — no court: %d | few players: %d | similar: %d",
+        skipped_no_court, skipped_few_players, skipped_similar,
+    )
 
     return saved_count
 
@@ -185,6 +236,14 @@ def main() -> None:
         "--max-frames", type=int, default=500,
         help="Maximum number of frames to extract (default: 500)",
     )
+    parser.add_argument(
+        "--min-players", type=int, default=4,
+        help="Minimum number of players detected to keep a frame (default: 4)",
+    )
+    parser.add_argument(
+        "--device", type=str, default=None,
+        help="Inference device for YOLO, e.g. 'mps', 'cuda', 'cpu' (default: auto)",
+    )
     args = parser.parse_args()
 
     if not args.video.exists():
@@ -199,6 +258,8 @@ def main() -> None:
         interval_sec=args.interval,
         min_similarity=args.min_similarity,
         max_frames=args.max_frames,
+        min_players=args.min_players,
+        device=args.device,
     )
 
 
