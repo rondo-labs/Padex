@@ -4,9 +4,9 @@
   "rally_metrics": [
     {
       "point_id": "S_001_01_02",
-      "rally_length": 2,
-      "duration_ms": 3899.999999999999,
-      "net_approaches": 0,
+      "rally_length": 25,
+      "duration_ms": 23866.666666666664,
+      "net_approaches": 21,
       "wall_bounces": 0,
       "attack_defense_switches": 0
     }
@@ -14,7 +14,7 @@
   "player_metrics": [
     {
       "player_id": "P_007",
-      "winners": 1,
+      "winners": 0,
       "errors": 0,
       "forced_errors": 0,
       "serve_percentage": 0.5,
@@ -25,11 +25,92 @@
       },
       "shot_type_success": {
         "serve": 0.0,
-        "unknown": 1.0
+        "unknown": 0.0
       },
       "distance_covered_m": 11.802625025471139,
       "avg_position_depth": 0.37248156705081986
+    },
+    {
+      "player_id": "P_010",
+      "winners": 0,
+      "errors": 0,
+      "forced_errors": 0,
+      "serve_percentage": 0.0,
+      "total_shots": 2,
+      "shot_type_counts": {
+        "unknown": 2
+      },
+      "shot_type_success": {
+        "unknown": 0.0
+      },
+      "distance_covered_m": 22.40802417927768,
+      "avg_position_depth": 9.006002472328882
+    },
+    {
+      "player_id": "P_011",
+      "winners": 1,
+      "errors": 0,
+      "forced_errors": 0,
+      "serve_percentage": 0.0,
+      "total_shots": 11,
+      "shot_type_counts": {
+        "unknown": 11
+      },
+      "shot_type_success": {
+        "unknown": 0.09090909090909091
+      },
+      "distance_covered_m": 12.04741555848261,
+      "avg_position_depth": 14.694906724462816
+    },
+    {
+      "player_id": "P_012",
+      "winners": 0,
+      "errors": 0,
+      "forced_errors": 0,
+      "serve_percentage": 0.0,
+      "total_shots": 3,
+      "shot_type_counts": {
+        "unknown": 3
+      },
+      "shot_type_success": {
+        "unknown": 0.0
+      },
+      "distance_covered_m": 25.02477195468983,
+      "avg_position_depth": 6.90741670544121
+    },
+    {
+      "player_id": "P_013",
+      "winners": 0,
+      "errors": 0,
+      "forced_errors": 0,
+      "serve_percentage": 0.0,
+      "total_shots": 7,
+      "shot_type_counts": {
+        "unknown": 7
+      },
+      "shot_type_success": {
+        "unknown": 0.0
+      },
+      "distance_covered_m": 11.281994602344392,
+      "avg_position_depth": 14.612636164457298
     }
   ],
-  "team_metrics": []
+  "team_metrics": [
+    {
+      "team_id": "T_1",
+      "net_control_pct": 0.8597285067873304,
+      "formation_switches": 64,
+      "avg_pair_distance": 4.890967408969583,
+      "wall_utilization_index": 0.0,
+      "transition_efficiency": null
+    },
+    {
+      "team_id": "T_2",
+      "net_control_pct": 0.9546218487394958,
+      "formation_switches": 65,
+      "avg_pair_distance": 6.084844335561173,
+      "wall_utilization_index": 0.0,
+      "transition_efficiency": null
+    }
+  ]
 }

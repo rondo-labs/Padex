@@ -208,7 +208,9 @@ __marimo__/
 
 # Model weights
 assets/weights/*.pt
+assets/weights/*.pth
 assets/weights/*.onnx
+
 
 # Pipeline output
 output/
