@@ -4,8 +4,9 @@ File Created: 2026-03-03
 Author: Xingnan Zhu
 File Name: video.py
 Description:
-    Video frame extraction utilities.
-    Reads video files and yields frames with timestamps.
+    Video I/O utilities.
+    VideoReader reads video files and yields frames with timestamps.
+    VideoWriter writes annotated frames to output video files.
 """
 
 from __future__ import annotations
@@ -90,3 +91,59 @@ class VideoReader:
     def __del__(self) -> None:
         if hasattr(self, "_cap") and self._cap.isOpened():
             self._cap.release()
+
+
+class VideoWriter:
+    """Writes frames to a video file using OpenCV."""
+
+    def __init__(
+        self,
+        path: str | Path,
+        fps: float,
+        frame_size: tuple[int, int],
+        codec: str = "mp4v",
+    ) -> None:
+        """Initialize video writer.
+
+        Args:
+            path: Output video file path.
+            fps: Frames per second.
+            frame_size: (width, height) of output frames.
+            codec: FourCC codec string (default: mp4v).
+        """
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+        fourcc = cv2.VideoWriter_fourcc(*codec)
+        self._writer = cv2.VideoWriter(
+            str(self.path), fourcc, fps, frame_size,
+        )
+        if not self._writer.isOpened():
+            raise RuntimeError(f"Cannot open video writer: {self.path}")
+
+        self._frame_count = 0
+
+    def write(self, frame: np.ndarray) -> None:
+        """Write a single frame."""
+        self._writer.write(frame)
+        self._frame_count += 1
+
+    @property
+    def frame_count(self) -> int:
+        """Number of frames written so far."""
+        return self._frame_count
+
+    def release(self) -> None:
+        """Release the writer."""
+        if self._writer.isOpened():
+            self._writer.release()
+
+    def __enter__(self) -> VideoWriter:
+        return self
+
+    def __exit__(self, *args) -> None:
+        self.release()
+
+    def __del__(self) -> None:
+        if hasattr(self, "_writer") and self._writer.isOpened():
+            self._writer.release()

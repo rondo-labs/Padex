@@ -119,7 +119,7 @@ class YoloPlayerDetectionStrategy(PlayerDetectionStrategy):
 
     def __init__(
         self,
-        model_path: str = "yolo26m.pt",
+        model_path: str = "assets/weights/yolo26m.pt",
         confidence_threshold: float = 0.5,
         device: str | None = None,
         imgsz: int = 1280,
@@ -369,7 +369,7 @@ class YoloPoseEstimationStrategy(PoseEstimationStrategy):
 
     def __init__(
         self,
-        model_path: str = "yolo26m-pose.pt",
+        model_path: str = "assets/weights/yolo26m-pose.pt",
         confidence_threshold: float = 0.3,
         device: str | None = None,
         imgsz: int = 640,
@@ -479,7 +479,7 @@ class PlayerDetector:
         detection_strategy: PlayerDetectionStrategy | None = None,
         team_classifier: TeamClassifier | None = None,
         pose_strategy: PoseEstimationStrategy | None = None,
-        model_path: str = "yolo26m.pt",
+        model_path: str = "assets/weights/yolo26m.pt",
         confidence_threshold: float = 0.5,
     ) -> None:
         self.detection_strategy = detection_strategy or YoloPlayerDetectionStrategy(

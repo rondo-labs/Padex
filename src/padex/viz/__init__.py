@@ -10,9 +10,13 @@ Description:
 from padex.viz.animation import RallyAnimator
 from padex.viz.court import CourtRenderer
 from padex.viz.dashboard import MatchDashboard
+from padex.viz.frame import FrameAnnotator
+from padex.viz.mini_court import MiniCourt
 
 __all__ = [
     "CourtRenderer",
+    "FrameAnnotator",
     "MatchDashboard",
+    "MiniCourt",
     "RallyAnimator",
 ]

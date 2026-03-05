@@ -104,7 +104,7 @@ class SahiYoloBallDetectionStrategy(BallDetectionStrategy):
 
     def __init__(
         self,
-        model_path: str = "yolo26m.pt",
+        model_path: str = "assets/weights/yolo26m.pt",
         confidence_threshold: float = 0.25,
         slice_size: int = 512,
         overlap_ratio: float = 0.2,
@@ -329,7 +329,7 @@ class BallDetector:
         confidence_threshold: float = 0.25,
     ) -> None:
         self.detection_strategy = detection_strategy or SahiYoloBallDetectionStrategy(
-            model_path=model_path or "yolo26m.pt",
+            model_path=model_path or "assets/weights/yolo26m.pt",
             confidence_threshold=confidence_threshold,
         )
         self.tracker = tracker or KalmanBallTracker()
