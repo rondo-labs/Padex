@@ -11,10 +11,10 @@
 
   Keypoint layout (top-down view):
 
-    top_left (0,20) ──── service_far_left (0,13) ──── net_left (0,10) ──── service_near_left (0,7) ──── bottom_left (0,0)
+    top_left (0,20) ──── service_far_left (0,17) ──── net_left (0,10) ──── service_near_left (0,3) ──── bottom_left (0,0)
          |                     |                           |                      |                           |
-    top_right(10,20)── service_far_right(10,13)── net_right(10,10) ── service_near_right(10,7) ── bottom_right(10,0)
-                         service_far_center(5,13)                    service_near_center(5,7)
+    top_right(10,20)── service_far_right(10,17)── net_right(10,10) ── service_near_right(10,3) ── bottom_right(10,0)
+                         service_far_center(5,17)                    service_near_center(5,3)
 
   Instructions for annotators:
     1. Place each keypoint at the INTERSECTION of the relevant court lines.
@@ -42,12 +42,12 @@
     <Label value="net_left" background="#FFFF00"/>
     <Label value="net_right" background="#FFFF44"/>
 
-    <!-- Service line near side (y=7) -->
+    <!-- Service line near side (y=3, 7m from net) -->
     <Label value="service_near_left" background="#00FF00"/>
     <Label value="service_near_center" background="#00CC00"/>
     <Label value="service_near_right" background="#009900"/>
 
-    <!-- Service line far side (y=13) -->
+    <!-- Service line far side (y=17, 7m from net) -->
     <Label value="service_far_left" background="#FF00FF"/>
     <Label value="service_far_center" background="#CC00CC"/>
     <Label value="service_far_right" background="#990099"/>
