@@ -4,63 +4,31 @@
   "rally_metrics": [
     {
       "point_id": "S_001_01_02",
-      "rally_length": 25,
+      "rally_length": 12,
       "duration_ms": 23866.666666666664,
-      "net_approaches": 21,
+      "net_approaches": 9,
       "wall_bounces": 0,
       "attack_defense_switches": 0
     }
   ],
   "player_metrics": [
     {
-      "player_id": "P_007",
-      "winners": 0,
-      "errors": 0,
-      "forced_errors": 0,
-      "serve_percentage": 0.5,
-      "total_shots": 2,
-      "shot_type_counts": {
-        "serve": 1,
-        "unknown": 1
-      },
-      "shot_type_success": {
-        "serve": 0.0,
-        "unknown": 0.0
-      },
-      "distance_covered_m": 11.802625025471139,
-      "avg_position_depth": 0.37248156705081986
-    },
-    {
-      "player_id": "P_010",
-      "winners": 0,
-      "errors": 0,
-      "forced_errors": 0,
-      "serve_percentage": 0.0,
-      "total_shots": 2,
-      "shot_type_counts": {
-        "unknown": 2
-      },
-      "shot_type_success": {
-        "unknown": 0.0
-      },
-      "distance_covered_m": 22.40802417927768,
-      "avg_position_depth": 9.006002472328882
-    },
-    {
       "player_id": "P_011",
       "winners": 1,
       "errors": 0,
       "forced_errors": 0,
-      "serve_percentage": 0.0,
-      "total_shots": 11,
+      "serve_percentage": 0.14285714285714285,
+      "total_shots": 7,
       "shot_type_counts": {
-        "unknown": 11
+        "serve": 1,
+        "unknown": 6
       },
       "shot_type_success": {
-        "unknown": 0.09090909090909091
+        "serve": 0.0,
+        "unknown": 0.16666666666666666
       },
-      "distance_covered_m": 12.04741555848261,
-      "avg_position_depth": 14.694906724462816
+      "distance_covered_m": 27.919659504340494,
+      "avg_position_depth": 17.075049286770764
     },
     {
       "player_id": "P_012",
@@ -75,8 +43,8 @@
       "shot_type_success": {
         "unknown": 0.0
       },
-      "distance_covered_m": 25.02477195468983,
-      "avg_position_depth": 6.90741670544121
+      "distance_covered_m": 30.751449878691165,
+      "avg_position_depth": 4.249473871626036
     },
     {
       "player_id": "P_013",
@@ -84,31 +52,31 @@
       "errors": 0,
       "forced_errors": 0,
       "serve_percentage": 0.0,
-      "total_shots": 7,
+      "total_shots": 2,
       "shot_type_counts": {
-        "unknown": 7
+        "unknown": 2
       },
       "shot_type_success": {
         "unknown": 0.0
       },
-      "distance_covered_m": 11.281994602344392,
-      "avg_position_depth": 14.612636164457298
+      "distance_covered_m": 26.224975650152565,
+      "avg_position_depth": 16.813381238582284
     }
   ],
   "team_metrics": [
     {
       "team_id": "T_1",
-      "net_control_pct": 0.8597285067873304,
-      "formation_switches": 64,
-      "avg_pair_distance": 4.890967408969583,
+      "net_control_pct": 1.0,
+      "formation_switches": 28,
+      "avg_pair_distance": 10.41711707082206,
       "wall_utilization_index": 0.0,
       "transition_efficiency": null
     },
     {
       "team_id": "T_2",
-      "net_control_pct": 0.9546218487394958,
-      "formation_switches": 65,
-      "avg_pair_distance": 6.084844335561173,
+      "net_control_pct": 1.0,
+      "formation_switches": 20,
+      "avg_pair_distance": 10.373315437157522,
       "wall_utilization_index": 0.0,
       "transition_efficiency": null
     }

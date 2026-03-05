@@ -51,6 +51,7 @@ class TrackingPipeline:
         ball_detector: BallDetector | None = None,
         calibration_sample_step: int = 300,
         device: str | None = None,
+        manual_calibration: CourtCalibration | None = None,
     ) -> None:
         self.video_path = Path(video_path)
         self.device = device or detect_device()
@@ -64,6 +65,7 @@ class TrackingPipeline:
             detection_strategy=SahiYoloBallDetectionStrategy(device=self.device),
         )
         self.calibration_sample_step = calibration_sample_step
+        self.manual_calibration = manual_calibration
 
     def run(
         self,
@@ -88,16 +90,23 @@ class TrackingPipeline:
 
         with VideoReader(self.video_path) as reader:
             # Stage 1: Court calibration
-            calibration = self._calibrate_court(reader)
+            calibration: CourtCalibration | None = None
             H: np.ndarray | None = None
-            if calibration is not None:
+
+            if self.manual_calibration is not None:
+                calibration = self.manual_calibration
                 H = np.array(calibration.homography_matrix)
-                logger.info(
-                    "Court calibrated (error=%.3f)",
-                    calibration.reprojection_error or -1,
-                )
+                logger.info("Using manual court calibration")
             else:
-                logger.warning("Court calibration failed — positions will be None")
+                calibration = self._calibrate_court(reader)
+                if calibration is not None:
+                    H = np.array(calibration.homography_matrix)
+                    logger.info(
+                        "Court calibrated (error=%.3f)",
+                        calibration.reprojection_error or -1,
+                    )
+                else:
+                    logger.warning("Court calibration failed — positions will be None")
 
             # Stage 2: Per-frame detection
             for frame_id, timestamp_ms, frame in reader.frames(

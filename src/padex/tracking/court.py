@@ -652,6 +652,74 @@ class CourtDetector:
         )
 
     @staticmethod
+    def manual_calibration(
+        keypoints_px: dict[str, tuple[float, float]],
+        frame_width: int,
+        frame_height: int,
+    ) -> CourtCalibration:
+        """Create a CourtCalibration from manually annotated keypoints.
+
+        Use this when the broadcast camera is fixed and you prefer to mark
+        court keypoints once rather than relying on automatic detection.
+
+        Args:
+            keypoints_px: Mapping of keypoint name to pixel coordinates.
+                Must contain at least 4 keypoints that exist in
+                PadelCourtModel.KEYPOINTS (e.g. ``{"bottom_left": (100, 900),
+                "bottom_right": (1800, 900), ...}``).
+            frame_width: Video frame width in pixels.
+            frame_height: Video frame height in pixels.
+
+        Returns:
+            A CourtCalibration ready to pass to TrackingPipeline.
+
+        Raises:
+            ValueError: If fewer than 4 valid keypoints are provided or
+                homography computation fails.
+        """
+        court_kps = COURT_MODEL.KEYPOINTS
+        px_coords: list[tuple[float, float]] = []
+        m_coords: list[tuple[float, float]] = []
+
+        for name, px in keypoints_px.items():
+            if name not in court_kps:
+                logger.warning("Unknown keypoint '%s', skipping", name)
+                continue
+            px_coords.append(px)
+            m_coords.append(court_kps[name])
+
+        if len(px_coords) < 4:
+            raise ValueError(
+                f"Need at least 4 keypoints, got {len(px_coords)}. "
+                f"Valid names: {list(court_kps.keys())}"
+            )
+
+        src = np.array(px_coords, dtype=np.float64)
+        dst = np.array(m_coords, dtype=np.float64)
+
+        H, mask = cv2.findHomography(src, dst, cv2.RANSAC, 3.0)
+        if H is None:
+            raise ValueError("Homography computation failed")
+
+        # Reprojection error
+        inlier_mask = mask.ravel().astype(bool)
+        src_in = src[inlier_mask]
+        dst_in = dst[inlier_mask]
+        projected = cv2.perspectiveTransform(
+            src_in.reshape(-1, 1, 2), H
+        ).reshape(-1, 2)
+        error = float(np.sqrt(np.mean(np.sum((projected - dst_in) ** 2, axis=1))))
+
+        return CourtCalibration(
+            frame_width=frame_width,
+            frame_height=frame_height,
+            homography_matrix=H.tolist(),
+            court_keypoints_px=list(px_coords),
+            court_keypoints_m=list(m_coords),
+            reprojection_error=error,
+        )
+
+    @staticmethod
     def _validate_homography(
         H: np.ndarray,
         frame_w: int,
