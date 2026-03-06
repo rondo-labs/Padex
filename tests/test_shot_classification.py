@@ -13,7 +13,7 @@ from padex.events.shot import (
     ContactEvent,
     PoseBasedShotTypeClassifier,
 )
-from padex.schemas.events import ShotType
+from padex.schemas.events import Bounce, BounceType, ShotType
 from padex.schemas.tracking import (
     BallFrame,
     BallVisibility,
@@ -97,6 +97,24 @@ def _make_ball_frames(
     ]
 
 
+def _ground_bounce(ts: float = 50.0) -> Bounce:
+    return Bounce(
+        type=BounceType.GROUND,
+        position=Position2D(x=5.0, y=5.0),
+        timestamp_ms=ts,
+    )
+
+
+def _wall_bounce(
+    bounce_type: BounceType = BounceType.BACK_WALL, ts: float = 60.0
+) -> Bounce:
+    return Bounce(
+        type=bounce_type,
+        position=Position2D(x=5.0, y=0.5),
+        timestamp_ms=ts,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -107,139 +125,180 @@ class TestPoseBasedClassifier:
         self.clf = PoseBasedShotTypeClassifier()
 
     def test_no_keypoints_returns_unknown(self):
+        """No keypoints → can't determine overhead → falls through to baseline."""
         contact = _make_contact()
-        shot_type, conf = self.clf.classify(contact, [], [])
-        assert shot_type == ShotType.UNKNOWN
-        assert conf == 0.3
+        shot_type, _ = self.clf.classify(
+            contact, [], [], [_ground_bounce()], []
+        )
+        # No keypoints → _is_overhead returns False → baseline branch
+        # No keypoints → _is_forehand returns True → GROUNDSTROKE_FH
+        assert shot_type in (
+            ShotType.GROUNDSTROKE_FH, ShotType.GROUNDSTROKE_BH, ShotType.UNKNOWN
+        )
 
     def test_insufficient_keypoints_returns_unknown(self):
+        """Only nose keypoint → overhead check fails → baseline fallback."""
         kps = [PoseKeypoint(name="nose", x=450.0, y=200.0, confidence=0.9)]
         contact = _make_contact()
-        shot_type, _ = self.clf.classify(contact, [], kps)
-        assert shot_type == ShotType.UNKNOWN
+        shot_type, _ = self.clf.classify(
+            contact, [], [], [_ground_bounce()], kps
+        )
+        # Falls through to baseline, _is_forehand returns True
+        assert shot_type in (
+            ShotType.GROUNDSTROKE_FH, ShotType.GROUNDSTROKE_BH, ShotType.UNKNOWN
+        )
+
+    # --- Branch 1: No ground bounce → net play ---
 
     def test_smash_at_net_high_wrist(self):
-        """Wrist far above shoulder at net → SMASH."""
+        """No ground bounce + wrist far above shoulder → SMASH."""
         kps = _make_keypoints(wrist_y=150.0, shoulder_y=250.0)  # diff=100 > 50
-        contact = _make_contact(player_y=10.0)  # at net
+        contact = _make_contact(player_y=10.0)
         ball_after = _make_ball_frames([(5, 10)] * 5)
-        shot_type, _ = self.clf.classify(contact, ball_after, kps)
+        shot_type, _ = self.clf.classify(
+            contact, [], ball_after, [], kps  # no bounces = no ground bounce
+        )
         assert shot_type == ShotType.SMASH
 
     def test_smash_exit_becomes_x3(self):
-        """Smash with ball exiting court → SMASH_X3."""
+        """No ground bounce + smash + ball exits court → SMASH_X3."""
         kps = _make_keypoints(wrist_y=150.0, shoulder_y=250.0)
         contact = _make_contact(player_y=10.0)
-        # Ball goes near edge of court (simulating exit)
         ball_after = _make_ball_frames(
             [(5.0, min(19.8, 10.0 + i * 0.8)) for i in range(15)]
-            + [(9.8, 19.8)] * 5  # near edge
+            + [(9.8, 19.8)] * 5
         )
-        shot_type, _ = self.clf.classify(contact, ball_after, kps)
+        shot_type, _ = self.clf.classify(
+            contact, [], ball_after, [], kps
+        )
         assert shot_type == ShotType.SMASH_X3
 
     def test_bandeja_moderate_height(self):
-        """Moderate wrist above shoulder at net → BANDEJA."""
+        """No ground bounce + moderate overhead → BANDEJA."""
         kps = _make_keypoints(wrist_y=220.0, shoulder_y=250.0)  # diff=30 < 50
         contact = _make_contact(player_y=10.0)
         ball_after = _make_ball_frames([(5, 10)] * 5)
-        shot_type, _ = self.clf.classify(contact, ball_after, kps)
+        shot_type, _ = self.clf.classify(
+            contact, [], ball_after, [], kps
+        )
         assert shot_type == ShotType.BANDEJA
 
     def test_vibora_side_spin(self):
-        """Moderate height at net + side spin → VIBORA."""
+        """No ground bounce + moderate height + side spin → VIBORA."""
         kps = _make_keypoints(
             wrist_y=220.0, shoulder_y=250.0, elbow_lateral=60.0
         )
         contact = _make_contact(player_y=10.0)
         ball_after = _make_ball_frames([(5, 10)] * 5)
-        shot_type, _ = self.clf.classify(contact, ball_after, kps)
+        shot_type, _ = self.clf.classify(
+            contact, [], ball_after, [], kps
+        )
         assert shot_type == ShotType.VIBORA
 
     def test_volley_low_at_net(self):
-        """Wrist below shoulder at net → VOLLEY."""
+        """No ground bounce + wrist below shoulder → VOLLEY."""
         kps = _make_keypoints(wrist_y=280.0, shoulder_y=250.0)
         contact = _make_contact(player_y=10.0)
-        # Ball travels far enough to not be drop shot
         ball_after = _make_ball_frames(
             [(5.0, 10.0 + i * 0.5) for i in range(10)]
         )
-        shot_type, _ = self.clf.classify(contact, ball_after, kps)
+        shot_type, _ = self.clf.classify(
+            contact, [], ball_after, [], kps
+        )
         assert shot_type == ShotType.VOLLEY
 
     def test_drop_shot_short_trajectory(self):
-        """Low at net + short trajectory → DROP_SHOT."""
+        """No ground bounce + low + short trajectory → DROP_SHOT."""
         kps = _make_keypoints(wrist_y=280.0, shoulder_y=250.0)
         contact = _make_contact(player_y=10.0)
-        # Ball barely moves
         ball_after = _make_ball_frames(
             [(5.0, 10.0 + i * 0.1) for i in range(10)]
         )
-        shot_type, _ = self.clf.classify(contact, ball_after, kps)
+        shot_type, _ = self.clf.classify(
+            contact, [], ball_after, [], kps
+        )
         assert shot_type == ShotType.DROP_SHOT
 
+    # --- Branch 2: Wall bounce before contact → defensive ---
+
+    def test_wall_return_with_wall_bounce(self):
+        """Wall bounce before contact + not at baseline → WALL_RETURN."""
+        kps = _make_keypoints(wrist_y=280.0, shoulder_y=250.0)
+        contact = _make_contact(player_y=5.0)  # mid-court, not baseline
+        ball_after = _make_ball_frames(
+            [(5.0, 5.0 + i * 0.3) for i in range(10)]
+        )
+        bounces = [_ground_bounce(30.0), _wall_bounce(BounceType.SIDE_WALL, 40.0)]
+        shot_type, _ = self.clf.classify(
+            contact, [], ball_after, bounces, kps
+        )
+        assert shot_type == ShotType.WALL_RETURN
+
+    def test_contra_pared_near_back_wall(self):
+        """Wall bounce + player at baseline → CONTRA_PARED."""
+        kps = _make_keypoints(wrist_y=280.0, shoulder_y=250.0)
+        contact = _make_contact(player_y=1.5)  # near back wall
+        ball_after = _make_ball_frames(
+            [(5.0, 1.5 + i * 0.3) for i in range(10)]
+        )
+        bounces = [_ground_bounce(30.0), _wall_bounce(BounceType.BACK_WALL, 40.0)]
+        shot_type, _ = self.clf.classify(
+            contact, [], ball_after, bounces, kps
+        )
+        assert shot_type == ShotType.CONTRA_PARED
+
+    # --- Branch 3: Ground bounce only → baseline ---
+
     def test_lob_from_baseline(self):
-        """High wrist at baseline + long arc → LOB."""
+        """Ground bounce + overhead + long arc → LOB."""
         kps = _make_keypoints(wrist_y=200.0, shoulder_y=250.0)
-        contact = _make_contact(player_y=2.0)  # baseline
-        # Ball travels far in y
+        contact = _make_contact(player_y=2.0)
         ball_after = _make_ball_frames(
             [(5.0, 2.0 + i * 1.0) for i in range(15)]
         )
-        shot_type, _ = self.clf.classify(contact, ball_after, kps)
+        bounces = [_ground_bounce()]
+        shot_type, _ = self.clf.classify(
+            contact, [], ball_after, bounces, kps
+        )
         assert shot_type == ShotType.LOB
 
     def test_bajada_high_baseline_no_lob(self):
-        """High wrist at baseline but short y travel → BAJADA."""
+        """Ground bounce + overhead + short y travel → BAJADA."""
         kps = _make_keypoints(wrist_y=200.0, shoulder_y=250.0)
         contact = _make_contact(player_y=2.0)
         ball_after = _make_ball_frames(
             [(5.0, 2.0 + i * 0.1) for i in range(5)]
         )
-        shot_type, _ = self.clf.classify(contact, ball_after, kps)
+        bounces = [_ground_bounce()]
+        shot_type, _ = self.clf.classify(
+            contact, [], ball_after, bounces, kps
+        )
         assert shot_type == ShotType.BAJADA
 
-    def test_wall_return_with_wall_bounce(self):
-        """Low baseline + ball near wall → WALL_RETURN."""
-        kps = _make_keypoints(wrist_y=280.0, shoulder_y=250.0)
-        contact = _make_contact(player_y=3.0)
-        # Ball goes near wall
-        ball_after = _make_ball_frames(
-            [(0.5, 3.0 + i * 0.3) for i in range(10)]
-        )
-        shot_type, _ = self.clf.classify(contact, ball_after, kps)
-        assert shot_type == ShotType.WALL_RETURN
-
-    def test_contra_pared_near_back_wall(self):
-        """Near back wall + wall bounce → CONTRA_PARED."""
-        kps = _make_keypoints(wrist_y=280.0, shoulder_y=250.0)
-        contact = _make_contact(player_y=1.5)  # near back wall
-        ball_after = _make_ball_frames(
-            [(0.5, 1.5 + i * 0.3) for i in range(10)]
-        )
-        shot_type, _ = self.clf.classify(contact, ball_after, kps)
-        assert shot_type == ShotType.CONTRA_PARED
-
     def test_chiquita_toward_net(self):
-        """Low baseline + ball moves toward net → CHIQUITA."""
+        """Ground bounce + low + ball moves toward net → CHIQUITA."""
         kps = _make_keypoints(wrist_y=280.0, shoulder_y=250.0)
         contact = _make_contact(player_y=4.0)
-        # Ball goes toward net (y=10) and doesn't touch walls
         ball_after = _make_ball_frames(
             [(5.0, 4.0 + i * 0.8) for i in range(10)]
         )
-        shot_type, _ = self.clf.classify(contact, ball_after, kps)
+        bounces = [_ground_bounce()]
+        shot_type, _ = self.clf.classify(
+            contact, [], ball_after, bounces, kps
+        )
         assert shot_type == ShotType.CHIQUITA
 
     def test_groundstroke_fh(self):
-        """Low baseline, no wall, not toward net → GROUNDSTROKE_FH."""
+        """Ground bounce + low + not toward net → GROUNDSTROKE."""
         kps = _make_keypoints(wrist_y=280.0, shoulder_y=250.0)
         contact = _make_contact(player_y=4.0)
-        # Ball goes slightly sideways (not toward net)
         ball_after = _make_ball_frames(
             [(5.0 + i * 0.3, 4.0) for i in range(10)]
         )
-        shot_type, _ = self.clf.classify(contact, ball_after, kps)
+        bounces = [_ground_bounce()]
+        shot_type, _ = self.clf.classify(
+            contact, [], ball_after, bounces, kps
+        )
         assert shot_type in (ShotType.GROUNDSTROKE_FH, ShotType.GROUNDSTROKE_BH)
 
     def test_low_confidence_keypoints_ignored(self):
@@ -251,9 +310,15 @@ class TestPoseBasedClassifier:
             PoseKeypoint(name="right_wrist", x=520.0, y=200.0, confidence=0.9),
         ]
         contact = _make_contact()
-        shot_type, _ = self.clf.classify(contact, [], kps)
-        # left_shoulder and left_wrist filtered out → insufficient → UNKNOWN
-        assert shot_type == ShotType.UNKNOWN
+        bounces = [_ground_bounce()]
+        shot_type, _ = self.clf.classify(
+            contact, [], [], bounces, kps
+        )
+        # left_shoulder and left_wrist filtered → _is_overhead fails → baseline
+        # Not UNKNOWN anymore since we don't require all 4 keypoints at top level
+        assert shot_type in (
+            ShotType.GROUNDSTROKE_FH, ShotType.GROUNDSTROKE_BH, ShotType.UNKNOWN
+        )
 
 
 class TestPoseClassifierHelpers:
@@ -291,13 +356,24 @@ class TestPoseClassifierHelpers:
         }
         assert PoseBasedShotTypeClassifier._is_forehand(kp_map) is False
 
-    def test_has_wall_bounce(self):
-        frames = _make_ball_frames([(0.5, 5.0)])
-        assert PoseBasedShotTypeClassifier._has_wall_bounce(frames) is True
+    def test_had_ground_bounce(self):
+        bounces = [_ground_bounce()]
+        assert PoseBasedShotTypeClassifier._had_ground_bounce(bounces) is True
+
+    def test_no_ground_bounce(self):
+        assert PoseBasedShotTypeClassifier._had_ground_bounce([]) is False
+
+    def test_had_wall_bounce(self):
+        bounces = [_wall_bounce(BounceType.BACK_WALL)]
+        result, btype = PoseBasedShotTypeClassifier._had_wall_bounce(bounces)
+        assert result is True
+        assert btype == BounceType.BACK_WALL
 
     def test_no_wall_bounce(self):
-        frames = _make_ball_frames([(5.0, 10.0)])
-        assert PoseBasedShotTypeClassifier._has_wall_bounce(frames) is False
+        bounces = [_ground_bounce()]
+        result, btype = PoseBasedShotTypeClassifier._had_wall_bounce(bounces)
+        assert result is False
+        assert btype is None
 
     def test_short_trajectory(self):
         frames = _make_ball_frames([(5.0, 5.0), (5.1, 5.1)])

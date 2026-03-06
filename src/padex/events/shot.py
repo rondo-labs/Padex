@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from padex.schemas.events import Bounce, Shot, ShotType
+from padex.schemas.events import Bounce, BounceType, Shot, ShotType
 from padex.schemas.tracking import (
     BallFrame,
     BallVisibility,
@@ -73,7 +73,9 @@ class ShotTypeClassifier(abc.ABC):
     def classify(
         self,
         contact: ContactEvent,
+        ball_frames_before: list[BallFrame],
         ball_frames_after: list[BallFrame],
+        bounces_before: list[Bounce],
         keypoints: list[PoseKeypoint],
     ) -> tuple[ShotType, float]:
         """Returns (shot_type, confidence)."""
@@ -214,7 +216,9 @@ class ServeOnlyShotTypeClassifier(ShotTypeClassifier):
     def classify(
         self,
         contact: ContactEvent,
+        ball_frames_before: list[BallFrame],
         ball_frames_after: list[BallFrame],
+        bounces_before: list[Bounce],
         keypoints: list[PoseKeypoint],
     ) -> tuple[ShotType, float]:
         return (ShotType.UNKNOWN, 0.3)
@@ -226,88 +230,178 @@ class ServeOnlyShotTypeClassifier(ShotTypeClassifier):
 
 
 class PoseBasedShotTypeClassifier(ShotTypeClassifier):
-    """Classifies shot types using player pose keypoints + ball trajectory.
+    """Classifies shot types using pre-contact ball state + pose + trajectory.
 
-    Uses rule-based heuristics based on:
-    - Wrist height relative to shoulders (overhead vs low)
-    - Player court position (net vs baseline)
-    - Ball trajectory (wall bounces, direction)
+    Decision tree (priority order):
+    1. Pre-contact ball state: no ground bounce → net play (volley family)
+    2. Pre-contact ball state: wall bounce → defensive (wall_return family)
+    3. Remaining: ground bounce only → baseline play (groundstroke family)
+
+    Within each category, pose (wrist height) and post-contact trajectory
+    refine the specific shot type.
     """
 
-    NET_ZONE_Y = 17.0
     NET_Y = 10.0
+    BASELINE_THRESHOLD = 3.0  # meters from back wall
     MIN_KP_CONF = 0.3
 
     def classify(
         self,
         contact: ContactEvent,
+        ball_frames_before: list[BallFrame],
         ball_frames_after: list[BallFrame],
+        bounces_before: list[Bounce],
         keypoints: list[PoseKeypoint],
     ) -> tuple[ShotType, float]:
-        if not keypoints:
-            return (ShotType.UNKNOWN, 0.3)
+        kp_map = self._build_kp_map(keypoints)
+        is_overhead, wrist_diff = self._is_overhead(kp_map)
+        player_pos = contact.player_position or contact.ball_position
 
-        kp_map = {
-            kp.name: kp for kp in keypoints if kp.confidence >= self.MIN_KP_CONF
+        had_ground = self._had_ground_bounce(bounces_before)
+        had_wall, wall_type = self._had_wall_bounce(bounces_before)
+
+        # --- Branch 1: No ground bounce before contact → net play ---
+        if not had_ground:
+            return self._classify_net_play(
+                is_overhead, wrist_diff, kp_map,
+                ball_frames_after, player_pos,
+            )
+
+        # --- Branch 2: Wall bounce before contact → defensive ---
+        if had_wall:
+            return self._classify_wall_play(
+                is_overhead, contact, ball_frames_after, wall_type,
+            )
+
+        # --- Branch 3: Ground bounce only → baseline / transition ---
+        return self._classify_baseline_play(
+            is_overhead, kp_map, contact, ball_frames_after,
+        )
+
+    # ------------------------------------------------------------------
+    # Branch classifiers
+    # ------------------------------------------------------------------
+
+    def _classify_net_play(
+        self,
+        is_overhead: bool,
+        wrist_diff: float,
+        kp_map: dict[str, PoseKeypoint],
+        ball_frames_after: list[BallFrame],
+        player_pos: Position2D,
+    ) -> tuple[ShotType, float]:
+        """Ball didn't bounce → volley / bandeja / vibora / smash."""
+        if is_overhead:
+            # High overhead with large wrist-shoulder gap → smash
+            if wrist_diff > 50:
+                if self._is_exit_smash(ball_frames_after):
+                    return (ShotType.SMASH_X3, 0.7)
+                return (ShotType.SMASH, 0.75)
+            # Side spin motion → vibora
+            if self._has_side_spin(kp_map):
+                return (ShotType.VIBORA, 0.65)
+            # Moderate overhead → bandeja
+            return (ShotType.BANDEJA, 0.7)
+
+        # Low contact, no bounce
+        if self._is_short_trajectory(ball_frames_after):
+            return (ShotType.DROP_SHOT, 0.65)
+        return (ShotType.VOLLEY, 0.7)
+
+    def _classify_wall_play(
+        self,
+        is_overhead: bool,
+        contact: ContactEvent,
+        ball_frames_after: list[BallFrame],
+        wall_type: BounceType | None,
+    ) -> tuple[ShotType, float]:
+        """Ball bounced off wall before contact → defensive shots."""
+        player_pos = contact.player_position or contact.ball_position
+        at_baseline = (
+            player_pos.y < self.BASELINE_THRESHOLD
+            or player_pos.y > (20.0 - self.BASELINE_THRESHOLD)
+        )
+
+        if at_baseline:
+            if self._is_lob_trajectory(ball_frames_after):
+                return (ShotType.LOB, 0.65)
+            return (ShotType.CONTRA_PARED, 0.6)
+
+        return (ShotType.WALL_RETURN, 0.6)
+
+    def _classify_baseline_play(
+        self,
+        is_overhead: bool,
+        kp_map: dict[str, PoseKeypoint],
+        contact: ContactEvent,
+        ball_frames_after: list[BallFrame],
+    ) -> tuple[ShotType, float]:
+        """Ball bounced on ground only → baseline / transition shots."""
+        if is_overhead:
+            # Overhead from baseline after ground bounce → bajada or lob
+            if self._is_lob_trajectory(ball_frames_after):
+                return (ShotType.LOB, 0.6)
+            return (ShotType.BAJADA, 0.6)
+
+        if self._is_chiquita(contact, ball_frames_after):
+            return (ShotType.CHIQUITA, 0.6)
+
+        if self._is_forehand(kp_map):
+            return (ShotType.GROUNDSTROKE_FH, 0.65)
+        return (ShotType.GROUNDSTROKE_BH, 0.65)
+
+    # ------------------------------------------------------------------
+    # Feature extraction helpers
+    # ------------------------------------------------------------------
+
+    def _build_kp_map(
+        self, keypoints: list[PoseKeypoint]
+    ) -> dict[str, PoseKeypoint]:
+        return {
+            kp.name: kp
+            for kp in keypoints
+            if kp.confidence >= self.MIN_KP_CONF
         }
 
+    @staticmethod
+    def _is_overhead(
+        kp_map: dict[str, PoseKeypoint],
+    ) -> tuple[bool, float]:
+        """Check if wrist is above shoulder (pixel coords: lower y = higher).
+
+        Returns (is_overhead, wrist_diff in pixels).
+        """
         required = [
-            "left_shoulder",
-            "right_shoulder",
-            "left_wrist",
-            "right_wrist",
+            "left_shoulder", "right_shoulder",
+            "left_wrist", "right_wrist",
         ]
         if not all(k in kp_map for k in required):
-            return (ShotType.UNKNOWN, 0.3)
+            return (False, 0.0)
 
-        # In pixel coords: lower y = higher on screen = overhead
         wrist_y = min(kp_map["left_wrist"].y, kp_map["right_wrist"].y)
         shoulder_y = min(
             kp_map["left_shoulder"].y, kp_map["right_shoulder"].y
         )
-        wrist_above_shoulder = wrist_y < shoulder_y
+        diff = shoulder_y - wrist_y  # positive = wrist above shoulder
+        return (diff > 0, diff)
 
-        player_pos = contact.player_position or contact.ball_position
-        at_net = (
-            player_pos.y >= (self.NET_Y - 3.0)
-            and player_pos.y <= self.NET_ZONE_Y
-        )
+    @staticmethod
+    def _had_ground_bounce(bounces_before: list[Bounce]) -> bool:
+        return any(b.type == BounceType.GROUND for b in bounces_before)
 
-        has_wall_bounce = self._has_wall_bounce(ball_frames_after)
-
-        # --- Rule chain ---
-        if at_net:
-            if wrist_above_shoulder:
-                wrist_diff = shoulder_y - wrist_y
-                if wrist_diff > 50:
-                    if self._is_exit_smash(ball_frames_after):
-                        return (ShotType.SMASH_X3, 0.6)
-                    return (ShotType.SMASH, 0.7)
-                if self._has_side_spin(kp_map):
-                    return (ShotType.VIBORA, 0.6)
-                return (ShotType.BANDEJA, 0.65)
-
-            if self._is_short_trajectory(ball_frames_after):
-                return (ShotType.DROP_SHOT, 0.6)
-            return (ShotType.VOLLEY, 0.65)
-
-        # Baseline play
-        if wrist_above_shoulder:
-            if self._is_lob_trajectory(ball_frames_after):
-                return (ShotType.LOB, 0.6)
-            return (ShotType.BAJADA, 0.55)
-
-        if has_wall_bounce:
-            if self._is_contra_pared(contact):
-                return (ShotType.CONTRA_PARED, 0.55)
-            return (ShotType.WALL_RETURN, 0.6)
-
-        if self._is_chiquita(contact, ball_frames_after):
-            return (ShotType.CHIQUITA, 0.55)
-
-        if self._is_forehand(kp_map):
-            return (ShotType.GROUNDSTROKE_FH, 0.6)
-        return (ShotType.GROUNDSTROKE_BH, 0.6)
+    @staticmethod
+    def _had_wall_bounce(
+        bounces_before: list[Bounce],
+    ) -> tuple[bool, BounceType | None]:
+        wall_types = {
+            BounceType.BACK_WALL, BounceType.SIDE_WALL,
+            BounceType.BACK_FENCE, BounceType.SIDE_FENCE,
+            BounceType.CORNER,
+        }
+        for b in reversed(bounces_before):
+            if b.type in wall_types:
+                return (True, b.type)
+        return (False, None)
 
     @staticmethod
     def _is_forehand(kp_map: dict[str, PoseKeypoint]) -> bool:
@@ -321,17 +415,6 @@ class PoseBasedShotTypeClassifier(ShotTypeClassifier):
             body_cx = (l_hip.x + r_hip.x) / 2
             return abs(r_wrist.x - body_cx) > abs(l_wrist.x - body_cx)
         return True
-
-    @staticmethod
-    def _has_wall_bounce(ball_frames_after: list[BallFrame]) -> bool:
-        for bf in ball_frames_after[:15]:
-            if bf.position is None:
-                continue
-            if bf.position.x < 1.0 or bf.position.x > 9.0:
-                return True
-            if bf.position.y < 1.0 or bf.position.y > 19.0:
-                return True
-        return False
 
     @staticmethod
     def _has_side_spin(kp_map: dict[str, PoseKeypoint]) -> bool:
@@ -384,11 +467,6 @@ class PoseBasedShotTypeClassifier(ShotTypeClassifier):
             if bf.position.x < 0.5 or bf.position.x > 9.5:
                 return True
         return False
-
-    @staticmethod
-    def _is_contra_pared(contact: ContactEvent) -> bool:
-        player_pos = contact.player_position or contact.ball_position
-        return player_pos.y < 2.0 or player_pos.y > 18.0
 
     @staticmethod
     def _is_chiquita(
@@ -460,29 +538,51 @@ class ShotDetector:
 
         shots: list[Shot] = []
         for shot_idx, contact in enumerate(contacts):
-            # Bounces between this contact and the next
+            # Timestamp of previous contact (or start of sequence)
+            prev_ts = (
+                contacts[shot_idx - 1].timestamp_ms
+                if shot_idx > 0
+                else -float("inf")
+            )
+            # Timestamp of next contact (or end of sequence)
             next_ts = (
                 contacts[shot_idx + 1].timestamp_ms
                 if shot_idx + 1 < len(contacts)
                 else float("inf")
             )
+
+            # Bounces between this contact and the next (trajectory)
             shot_bounces = [
                 b
                 for b in bounces
                 if contact.timestamp_ms <= (b.timestamp_ms or 0) < next_ts
             ]
 
-            # Classify — find keypoints for the contact player at contact frame
+            # Bounces between previous contact and this one
+            bounces_before = [
+                b
+                for b in bounces
+                if prev_ts < (b.timestamp_ms or 0) < contact.timestamp_ms
+            ]
+
+            # Ball frames before and after contact
+            ball_before = [
+                bf
+                for bf in ball_frames
+                if prev_ts < bf.timestamp_ms <= contact.timestamp_ms
+            ][-30:]
             ball_after = [
                 bf
                 for bf in ball_frames
                 if bf.timestamp_ms >= contact.timestamp_ms
             ][:30]
+
+            # Classify
             contact_kps = self._find_keypoints(
                 player_frames, contact.player_id, contact.frame_id
             )
             shot_type, conf = self.shot_type_classifier.classify(
-                contact, ball_after, contact_kps
+                contact, ball_before, ball_after, bounces_before, contact_kps
             )
 
             shot_id = (

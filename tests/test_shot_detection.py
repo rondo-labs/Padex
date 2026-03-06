@@ -169,7 +169,7 @@ class TestServeOnlyClassifier:
             player_position=None,
             contact_confidence=0.9,
         )
-        shot_type, conf = classifier.classify(contact, [], [])
+        shot_type, conf = classifier.classify(contact, [], [], [], [])
         assert shot_type == ShotType.UNKNOWN
         assert conf == 0.3
 
