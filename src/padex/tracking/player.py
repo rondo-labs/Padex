@@ -372,7 +372,7 @@ class YoloPoseEstimationStrategy(PoseEstimationStrategy):
         model_path: str = "assets/weights/yolo26m-pose.pt",
         confidence_threshold: float = 0.3,
         device: str | None = None,
-        imgsz: int = 640,
+        imgsz: int = 1280,
     ) -> None:
         self.model_path = model_path
         self.confidence_threshold = confidence_threshold
@@ -417,31 +417,31 @@ class YoloPoseEstimationStrategy(PoseEstimationStrategy):
         kpts_xy = det_keypoints.xy.cpu().numpy()  # (N, 17, 2)
         kpts_conf = det_keypoints.conf.cpu().numpy()  # (N, 17)
 
-        # Match each input bbox to the closest YOLO-Pose detection
+        # Match input bboxes to YOLO-Pose detections via IoU + Hungarian
+        from scipy.optimize import linear_sum_assignment
+
+        iou_matrix = self._compute_iou_matrix(bboxes, det_xyxy)
+        cost_matrix = 1.0 - iou_matrix
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+        # Build match map: input bbox index → pose detection index
+        match_map: dict[int, int] = {}
+        for r, c in zip(row_ind, col_ind):
+            if iou_matrix[r, c] >= 0.3:
+                match_map[r] = c
+
         result: list[list[PoseKeypoint]] = []
-        for bbox in bboxes:
-            bcx = (bbox.x1 + bbox.x2) / 2.0
-            bcy = (bbox.y1 + bbox.y2) / 2.0
-
-            best_idx = -1
-            best_dist = float("inf")
-            for j in range(len(det_xyxy)):
-                dcx = (det_xyxy[j][0] + det_xyxy[j][2]) / 2.0
-                dcy = (det_xyxy[j][1] + det_xyxy[j][3]) / 2.0
-                dist = (bcx - dcx) ** 2 + (bcy - dcy) ** 2
-                if dist < best_dist:
-                    best_dist = dist
-                    best_idx = j
-
-            if best_idx < 0:
+        for i in range(len(bboxes)):
+            if i not in match_map:
                 result.append([])
                 continue
 
+            j = match_map[i]
             kp_list: list[PoseKeypoint] = []
             for k in range(len(self.COCO_KEYPOINT_NAMES)):
-                x_val = float(kpts_xy[best_idx, k, 0])
-                y_val = float(kpts_xy[best_idx, k, 1])
-                c_val = float(kpts_conf[best_idx, k])
+                x_val = float(kpts_xy[j, k, 0])
+                y_val = float(kpts_xy[j, k, 1])
+                c_val = float(kpts_conf[j, k])
                 if c_val > 0.0:
                     kp_list.append(
                         PoseKeypoint(
@@ -454,6 +454,26 @@ class YoloPoseEstimationStrategy(PoseEstimationStrategy):
             result.append(kp_list)
 
         return result
+
+    @staticmethod
+    def _compute_iou_matrix(
+        bboxes: list[BoundingBox], det_xyxy: np.ndarray
+    ) -> np.ndarray:
+        """Compute IoU matrix between input bboxes and detection bboxes."""
+        n, m = len(bboxes), len(det_xyxy)
+        iou = np.zeros((n, m), dtype=np.float64)
+        for i, bbox in enumerate(bboxes):
+            for j in range(m):
+                x1 = max(bbox.x1, det_xyxy[j, 0])
+                y1 = max(bbox.y1, det_xyxy[j, 1])
+                x2 = min(bbox.x2, det_xyxy[j, 2])
+                y2 = min(bbox.y2, det_xyxy[j, 3])
+                inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+                area_a = (bbox.x2 - bbox.x1) * (bbox.y2 - bbox.y1)
+                area_b = (det_xyxy[j, 2] - det_xyxy[j, 0]) * (det_xyxy[j, 3] - det_xyxy[j, 1])
+                union = area_a + area_b - inter
+                iou[i, j] = inter / union if union > 0 else 0.0
+        return iou
 
     def reset(self) -> None:
         self._model = None
@@ -488,6 +508,8 @@ class PlayerDetector:
         )
         self.team_classifier = team_classifier or JerseyColorTeamClassifier()
         self.pose_strategy = pose_strategy
+        self._pose_smooth_alpha = 0.6
+        self._pose_buffer: dict[str, dict[str, tuple[float, float, float]]] = {}
 
     def detect(
         self,
@@ -523,6 +545,7 @@ class PlayerDetector:
         self.team_classifier.reset()
         if self.pose_strategy is not None:
             self.pose_strategy.reset()
+        self._pose_buffer.clear()
 
     # -- Private helpers ---------------------------------------------------
 
@@ -576,6 +599,10 @@ class PlayerDetector:
             team_id = team_map.get(i)
             keypoints = pose_results[i] if pose_results and i < len(pose_results) else []
 
+            # 5a. Temporal EMA smoothing (only for tracked players)
+            if keypoints and det.track_id is not None:
+                keypoints = self._smooth_keypoints(player_id, keypoints)
+
             player_frames.append(
                 PlayerFrame(
                     frame_id=frame_id,
@@ -590,6 +617,29 @@ class PlayerDetector:
             )
 
         return player_frames
+
+    def _smooth_keypoints(
+        self, player_id: str, keypoints: list[PoseKeypoint]
+    ) -> list[PoseKeypoint]:
+        """Apply EMA smoothing to keypoints for a tracked player."""
+        alpha = self._pose_smooth_alpha
+        prev = self._pose_buffer.get(player_id, {})
+        smoothed: list[PoseKeypoint] = []
+        new_buf: dict[str, tuple[float, float, float]] = {}
+
+        for kp in keypoints:
+            if kp.name in prev:
+                px, py, pc = prev[kp.name]
+                sx = alpha * kp.x + (1 - alpha) * px
+                sy = alpha * kp.y + (1 - alpha) * py
+                sc = alpha * kp.confidence + (1 - alpha) * pc
+            else:
+                sx, sy, sc = kp.x, kp.y, kp.confidence
+            new_buf[kp.name] = (sx, sy, sc)
+            smoothed.append(PoseKeypoint(name=kp.name, x=sx, y=sy, confidence=sc))
+
+        self._pose_buffer[player_id] = new_buf
+        return smoothed
 
     def _pixel_to_court(
         self, bbox: BoundingBox, H: np.ndarray

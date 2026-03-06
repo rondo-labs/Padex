@@ -41,6 +41,36 @@ _BALL_COLORS = {
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
 _FONT_SMALL = cv2.FONT_HERSHEY_PLAIN
 
+# COCO skeleton connections (pairs of keypoint indices)
+_COCO_SKELETON = [
+    (0, 1), (0, 2), (1, 3), (2, 4),          # head
+    (5, 6),                                     # shoulders
+    (5, 7), (7, 9), (6, 8), (8, 10),           # arms
+    (5, 11), (6, 12), (11, 12),                 # torso
+    (11, 13), (13, 15), (12, 14), (14, 16),     # legs
+]
+
+# COCO keypoint names (index order)
+_COCO_KEYPOINT_NAMES = [
+    "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+    "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+    "left_wrist", "right_wrist", "left_hip", "right_hip",
+    "left_knee", "right_knee", "left_ankle", "right_ankle",
+]
+
+# Colors per skeleton region (BGR)
+_SKELETON_COLORS = {
+    (0, 1): (255, 200, 50),   (0, 2): (255, 200, 50),   # head - cyan
+    (1, 3): (255, 200, 50),   (2, 4): (255, 200, 50),
+    (5, 6): (0, 255, 0),                                   # shoulders - green
+    (5, 7): (0, 200, 255),    (7, 9): (0, 200, 255),       # left arm - orange
+    (6, 8): (255, 0, 200),    (8, 10): (255, 0, 200),      # right arm - magenta
+    (5, 11): (0, 255, 0),     (6, 12): (0, 255, 0),        # torso - green
+    (11, 12): (0, 255, 0),
+    (11, 13): (0, 255, 255),  (13, 15): (0, 255, 255),     # left leg - yellow
+    (12, 14): (255, 255, 0),  (14, 16): (255, 255, 0),     # right leg - cyan
+}
+
 
 class FrameAnnotator:
     """All OpenCV frame annotation logic in one place."""
@@ -65,6 +95,40 @@ class FrameAnnotator:
             (tw, th), _ = cv2.getTextSize(label, _FONT, 0.5, 1)
             cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw + 4, y1), color, -1)
             cv2.putText(frame, label, (x1 + 2, y1 - 4), _FONT, 0.5, (255, 255, 255), 1)
+
+    def draw_pose_keypoints(
+        self,
+        frame: np.ndarray,
+        player_frames: list[PlayerFrame],
+    ) -> None:
+        """Draw pose keypoints and skeleton connections for each player."""
+        for pf in player_frames:
+            if not pf.keypoints:
+                continue
+
+            # Build name→(x, y, conf) lookup
+            kp_map: dict[str, tuple[int, int, float]] = {}
+            for kp in pf.keypoints:
+                kp_map[kp.name] = (int(kp.x), int(kp.y), kp.confidence)
+
+            # Index-based lookup
+            kp_by_idx: dict[int, tuple[int, int]] = {}
+            for idx, name in enumerate(_COCO_KEYPOINT_NAMES):
+                if name in kp_map:
+                    x, y, conf = kp_map[name]
+                    if conf > 0.3:
+                        kp_by_idx[idx] = (x, y)
+
+            # Draw skeleton lines
+            for i, j in _COCO_SKELETON:
+                if i in kp_by_idx and j in kp_by_idx:
+                    color = _SKELETON_COLORS.get((i, j), (200, 200, 200))
+                    cv2.line(frame, kp_by_idx[i], kp_by_idx[j], color, 2, cv2.LINE_AA)
+
+            # Draw keypoint circles
+            for idx, (x, y) in kp_by_idx.items():
+                cv2.circle(frame, (x, y), 4, (255, 255, 255), -1)
+                cv2.circle(frame, (x, y), 4, (0, 0, 0), 1)
 
     def draw_ball(
         self,
@@ -206,6 +270,7 @@ class FrameAnnotator:
         self.draw_court_lines(frame, calibration)
         self.draw_court_keypoints(frame, calibration)
         self.draw_player_bboxes(frame, player_frames)
+        self.draw_pose_keypoints(frame, player_frames)
         self.draw_ball(frame, ball_frame)
         self.draw_shot_label(frame, shot, ball_frame)
         self.draw_mini_court(frame, player_frames, ball_frame)

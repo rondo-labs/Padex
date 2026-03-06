@@ -459,6 +459,7 @@ def run(
     device: str | None = None,
     calibrate: bool = False,
     calibration_file: str | Path | None = None,
+    enable_pose: bool = False,
 ) -> None:
     """Run the full analysis pipeline.
 
@@ -511,6 +512,7 @@ def run(
     logger.info("Pass 1: Running tracking pipeline...")
     pipeline = TrackingPipeline(
         video_path, device=device, manual_calibration=manual_cal,
+        enable_pose=enable_pose,
     )
     result = pipeline.run(start_frame=start_frame, end_frame=end_frame)
     logger.info(
@@ -642,6 +644,11 @@ def main():
         help="Manually calibrate the court before running (recommended)",
     )
     parser.add_argument(
+        "--pose",
+        action="store_true",
+        help="Enable YOLO-Pose keypoint detection and draw skeleton on output video",
+    )
+    parser.add_argument(
         "--calibration-file",
         default=None,
         help="Path to save/load court calibration JSON",
@@ -669,6 +676,7 @@ def main():
         device=args.device,
         calibrate=args.calibrate,
         calibration_file=args.calibration_file,
+        enable_pose=args.pose,
     )
 
 

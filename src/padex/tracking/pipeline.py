@@ -20,7 +20,11 @@ from padex.schemas.tracking import BallFrame, CourtCalibration, PlayerFrame
 from padex.tracking.ball import BallDetector, SahiYoloBallDetectionStrategy
 from padex.tracking.court import CourtDetector
 from padex.tracking.device import detect_device
-from padex.tracking.player import PlayerDetector, YoloPlayerDetectionStrategy
+from padex.tracking.player import (
+    PlayerDetector,
+    YoloPlayerDetectionStrategy,
+    YoloPoseEstimationStrategy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,14 +56,20 @@ class TrackingPipeline:
         calibration_sample_step: int = 300,
         device: str | None = None,
         manual_calibration: CourtCalibration | None = None,
+        enable_pose: bool = False,
     ) -> None:
         self.video_path = Path(video_path)
         self.device = device or detect_device()
         logger.info("Inference device: %s", self.device)
 
+        pose_strategy = (
+            YoloPoseEstimationStrategy(device=self.device) if enable_pose else None
+        )
+
         self.court_detector = court_detector or CourtDetector()
         self.player_detector = player_detector or PlayerDetector(
             detection_strategy=YoloPlayerDetectionStrategy(device=self.device),
+            pose_strategy=pose_strategy,
         )
         self.ball_detector = ball_detector or BallDetector(
             detection_strategy=SahiYoloBallDetectionStrategy(device=self.device),
