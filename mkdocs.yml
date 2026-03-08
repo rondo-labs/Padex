@@ -1,0 +1,55 @@
+site_name: Padex
+site_description: Open-source padel video analytics toolkit
+site_url: https://padex.readthedocs.io
+repo_url: https://github.com/rondo-labs/Padex
+repo_name: rondo-labs/Padex
+
+theme:
+  name: material
+  palette:
+    primary: deep purple
+  features:
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+    - content.tabs.join
+
+nav:
+  - Home: index.md
+  - Quick Start: quickstart.md
+  - Guides:
+    - Court Calibration: guides/calibration.md
+    - Pipeline: guides/pipeline.md
+    - Shot Classification: guides/shot-classification.md
+    - CLI Reference: guides/cli.md
+  - Architecture: architecture.md
+  - API Reference:
+    - Overview: api/index.md
+    - padex: api/padex.md
+    - padex.calibration: api/calibration.md
+    - padex.tracking: api/tracking.md
+    - padex.events: api/events.md
+    - padex.schemas: api/schemas.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_source: false
+            show_root_heading: true
+            members_order: source
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+  - tables
+  - toc:
+      permalink: true

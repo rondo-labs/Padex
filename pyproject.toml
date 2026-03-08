@@ -35,6 +35,10 @@ dev = [
     "ruff>=0.3",
     "mypy>=1.9",
 ]
+docs = [
+    "mkdocs-material",
+    "mkdocstrings[python]",
+]
 
 [project.urls]
 Repository = "https://github.com/rondo-labs/Padex"
@@ -45,6 +49,7 @@ padex = "padex.cli:main"
 
 [dependency-groups]
 dev = ["padex[dev]"]
+docs = ["padex[docs]"]
 
 [build-system]
 requires = ["hatchling"]
