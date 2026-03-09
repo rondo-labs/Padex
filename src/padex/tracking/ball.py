@@ -326,34 +326,37 @@ class TrackNetBallDetectionStrategy(BallDetectionStrategy):
         scale_x = w_orig / self.INFER_W
         scale_y = h_orig / self.INFER_H
 
+        if heatmap.max() == 0:
+            return None, None, 0.0
+
         # Normalize to 0-255 and threshold
-        feature = (heatmap.astype(np.float32) / heatmap.max() * 255).astype(np.uint8) if heatmap.max() > 0 else heatmap
+        feature = (heatmap.astype(np.float32) / heatmap.max() * 255).astype(np.uint8)
         _, binary = cv2.threshold(feature, self.HEATMAP_THRESHOLD, 255, cv2.THRESH_BINARY)
 
-        circles = cv2.HoughCircles(
-            binary,
-            cv2.HOUGH_GRADIENT,
-            dp=1, minDist=1,
-            param1=50, param2=2,
-            minRadius=2, maxRadius=7,
+        # Find connected components and use the largest blob's centroid
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            binary, connectivity=8
         )
 
-        if circles is None or len(circles[0]) == 0:
+        if num_labels <= 1:
+            # No foreground blob found
             return None, None, 0.0
 
-        # Pick the circle with highest heatmap value at its center
-        best_cx, best_cy, best_conf = None, None, 0.0
-        for cx, cy, _ in circles[0]:
-            iy = int(np.clip(cy, 0, self.INFER_H - 1))
-            ix = int(np.clip(cx, 0, self.INFER_W - 1))
-            conf = float(heatmap[iy, ix]) / 255.0
-            if conf > best_conf:
-                best_cx, best_cy, best_conf = cx, cy, conf
+        # Skip label 0 (background), find largest foreground component
+        fg_areas = stats[1:, cv2.CC_STAT_AREA]
+        best_label = int(np.argmax(fg_areas)) + 1  # +1 to skip background
 
-        if best_cx is None:
+        # Filter out blobs that are too large (likely noise)
+        if fg_areas[best_label - 1] > 200:
             return None, None, 0.0
 
-        return float(best_cx * scale_x), float(best_cy * scale_y), best_conf
+        cx, cy = centroids[best_label]
+
+        # Confidence from peak heatmap value in the blob region
+        blob_mask = labels == best_label
+        confidence = float(heatmap[blob_mask].max()) / 255.0
+
+        return float(cx * scale_x), float(cy * scale_y), confidence
 
     def reset(self) -> None:
         self._frame_buffer.clear()
