@@ -338,12 +338,22 @@ class TrackNetBallDetectionStrategy(BallDetectionStrategy):
             minRadius=2, maxRadius=7,
         )
 
-        if circles is None or len(circles[0]) != 1:
+        if circles is None or len(circles[0]) == 0:
             return None, None, 0.0
 
-        cx, cy, _ = circles[0][0]
-        confidence = float(heatmap[int(cy), int(cx)]) / 255.0
-        return float(cx * scale_x), float(cy * scale_y), confidence
+        # Pick the circle with highest heatmap value at its center
+        best_cx, best_cy, best_conf = None, None, 0.0
+        for cx, cy, _ in circles[0]:
+            iy = int(np.clip(cy, 0, self.INFER_H - 1))
+            ix = int(np.clip(cx, 0, self.INFER_W - 1))
+            conf = float(heatmap[iy, ix]) / 255.0
+            if conf > best_conf:
+                best_cx, best_cy, best_conf = cx, cy, conf
+
+        if best_cx is None:
+            return None, None, 0.0
+
+        return float(best_cx * scale_x), float(best_cy * scale_y), best_conf
 
     def reset(self) -> None:
         self._frame_buffer.clear()
@@ -622,6 +632,27 @@ class BallDetector:
             position=None,
             confidence=raw.confidence if raw else 0.0,
             visibility=BallVisibility.VISIBLE if raw else BallVisibility.OCCLUDED,
+        )
+
+    def detect_and_track_single(
+        self,
+        frame: np.ndarray,
+        frame_id: int,
+        timestamp_ms: float,
+    ) -> BallFrame:
+        """Detect and track ball in a single frame (streaming mode).
+
+        Uses the Kalman tracker for cross-frame state. Call frames in order.
+        """
+        raw = self.detection_strategy.detect(frame, frame_id, timestamp_ms)
+        position, visibility = self.tracker.update(raw, timestamp_ms)
+        return BallFrame(
+            frame_id=frame_id,
+            timestamp_ms=timestamp_ms,
+            bbox=raw.bbox if raw else None,
+            position=position,
+            confidence=raw.confidence if raw else 0.0,
+            visibility=visibility,
         )
 
     def track(

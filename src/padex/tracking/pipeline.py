@@ -72,7 +72,7 @@ class TrackingPipeline:
             pose_strategy=pose_strategy,
         )
         self.ball_detector = ball_detector or BallDetector(
-            detection_strategy=SahiYoloBallDetectionStrategy(device=self.device),
+            use_tracknet=True,
         )
         self.calibration_sample_step = calibration_sample_step
         self.manual_calibration = manual_calibration
@@ -96,9 +96,11 @@ class TrackingPipeline:
         from padex.io.video import VideoReader
 
         player_frames: list[PlayerFrame] = []
-        ball_frame_buffer: list[tuple[int, float, np.ndarray]] = []
+        ball_frames: list[BallFrame] = []
 
         with VideoReader(self.video_path) as reader:
+            total_frames = reader.frame_count
+
             # Stage 1: Court calibration
             calibration: CourtCalibration | None = None
             H: np.ndarray | None = None
@@ -118,7 +120,12 @@ class TrackingPipeline:
                 else:
                     logger.warning("Court calibration failed — positions will be None")
 
-            # Stage 2: Per-frame detection
+            # Set homography for ball tracker before the loop
+            if H is not None:
+                self.ball_detector.tracker.set_homography(H)
+
+            # Stage 2: Per-frame detection (streaming — no frame buffering)
+            processed = 0
             for frame_id, timestamp_ms, frame in reader.frames(
                 start_frame=start_frame, end_frame=end_frame, step=step
             ):
@@ -128,14 +135,22 @@ class TrackingPipeline:
                 )
                 player_frames.extend(pf_list)
 
-                # Buffer frame for batch ball tracking
-                ball_frame_buffer.append((frame_id, timestamp_ms, frame))
+                # Ball detection + tracking (streaming, no buffering)
+                bf = self.ball_detector.detect_and_track_single(
+                    frame, frame_id, timestamp_ms
+                )
+                ball_frames.append(bf)
 
-        # Stage 3: Batch ball tracking with Kalman
-        logger.info("Running ball tracking on %d frames", len(ball_frame_buffer))
-        ball_frames = self.ball_detector.track(
-            ball_frame_buffer, homography_matrix=H
-        )
+                processed += 1
+                if processed % 500 == 0:
+                    logger.info(
+                        "Processed %d / %d frames (%.1f%%)",
+                        processed,
+                        total_frames,
+                        100.0 * processed / total_frames,
+                    )
+
+        logger.info("Tracking complete: %d frames processed", processed)
 
         return TrackingResult(
             player_frames=player_frames,

@@ -327,11 +327,22 @@ def _nearest_player_distance(
     return min_dist
 
 
+def _build_player_lookup(
+    player_frames: list[PlayerFrame],
+) -> dict[int, list[PlayerFrame]]:
+    """Build frame_id → player_frames lookup (once, O(M))."""
+    lookup: dict[int, list[PlayerFrame]] = defaultdict(list)
+    for pf in player_frames:
+        lookup[pf.frame_id].append(pf)
+    return lookup
+
+
 def extract_event_features(
     ball_frames: list[BallFrame],
     player_frames: list[PlayerFrame],
     center_idx: int,
     window: int = _DEFAULT_WINDOW,
+    player_lookup: dict[int, list[PlayerFrame]] | None = None,
 ) -> np.ndarray | None:
     """Extract feature vector for a single frame (center of window).
 
@@ -341,14 +352,8 @@ def extract_event_features(
     n = len(ball_frames)
     window_size = 2 * window + 1
 
-    # Build player lookup for this window
-    player_lookup: dict[int, list[PlayerFrame]] = defaultdict(list)
-    for pf in player_frames:
-        fid = pf.frame_id
-        bf_start = ball_frames[max(0, center_idx - window)].frame_id
-        bf_end = ball_frames[min(n - 1, center_idx + window)].frame_id
-        if bf_start <= fid <= bf_end:
-            player_lookup[fid].append(pf)
+    if player_lookup is None:
+        player_lookup = _build_player_lookup(player_frames)
 
     features = np.zeros((window_size, _FEAT_DIM), dtype=np.float32)
 
@@ -399,9 +404,12 @@ def extract_all_features(
 ) -> np.ndarray:
     """Extract features for all frames. Returns shape (N, window_size * _FEAT_DIM)."""
     feat_dim = (2 * window + 1) * _FEAT_DIM
+    player_lookup = _build_player_lookup(player_frames)
     result = np.zeros((len(ball_frames), feat_dim), dtype=np.float32)
     for i in range(len(ball_frames)):
-        feat = extract_event_features(ball_frames, player_frames, i, window)
+        feat = extract_event_features(
+            ball_frames, player_frames, i, window, player_lookup
+        )
         if feat is not None:
             result[i] = feat
     return result
