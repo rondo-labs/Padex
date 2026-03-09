@@ -14,7 +14,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from padex.schemas.events import Shot
+from padex.schemas.events import Bounce, BounceType, Shot
 from padex.schemas.tracking import (
     BallFrame,
     BallVisibility,
@@ -36,6 +36,17 @@ _BALL_COLORS = {
     BallVisibility.VISIBLE: (59, 235, 255),    # yellow
     BallVisibility.OCCLUDED: (128, 128, 128),   # gray
     BallVisibility.INFERRED: (255, 165, 0),     # orange
+}
+
+# Bounce impact colors by type (BGR)
+_BOUNCE_COLORS: dict[BounceType, tuple[int, int, int]] = {
+    BounceType.GROUND: (0, 255, 0),        # green
+    BounceType.BACK_WALL: (0, 0, 255),     # red
+    BounceType.SIDE_WALL: (0, 0, 255),     # red
+    BounceType.NET: (0, 255, 255),         # yellow
+    BounceType.BACK_FENCE: (0, 165, 255),  # orange
+    BounceType.SIDE_FENCE: (0, 165, 255),  # orange
+    BounceType.CORNER: (0, 165, 255),      # orange
 }
 
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
@@ -238,6 +249,68 @@ class FrameAnnotator:
         cv2.rectangle(frame, (cx - 2, cy - th - 4), (cx + tw + 4, cy + 4), (0, 0, 0), -1)
         cv2.putText(frame, label, (cx, cy), _FONT, 0.6, (0, 255, 255), 2)
 
+    def draw_bounce_impacts(
+        self,
+        frame: np.ndarray,
+        active_bounces: list[tuple[Bounce, float]],
+        calibration: CourtCalibration | None = None,
+    ) -> None:
+        """Draw fading impact marks at bounce locations.
+
+        Args:
+            frame: Video frame (BGR, HWC). Modified in-place.
+            active_bounces: List of (Bounce, progress) where progress
+                goes from 0.0 (just occurred) to 1.0 (about to disappear).
+            calibration: Court calibration with homography matrix.
+        """
+        if calibration is None or not active_bounces:
+            return
+
+        H = np.array(calibration.homography_matrix)
+        try:
+            H_inv = np.linalg.inv(H)
+        except np.linalg.LinAlgError:
+            return
+
+        overlay = frame.copy()
+
+        for bounce, progress in active_bounces:
+            if bounce.position is None:
+                continue
+
+            # Convert court meters → pixel coordinates
+            pt_m = np.array(
+                [[[bounce.position.x, bounce.position.y]]], dtype=np.float64
+            )
+            pt_px = cv2.perspectiveTransform(pt_m, H_inv)[0][0]
+            cx, cy = int(pt_px[0]), int(pt_px[1])
+
+            alpha = 1.0 - progress
+            color = _BOUNCE_COLORS.get(bounce.type, (0, 165, 255))
+
+            # Outer ring (expanding)
+            radius = int(12 + 8 * progress)
+            thickness = max(1, int(3 * alpha))
+            cv2.circle(overlay, (cx, cy), radius, color, thickness, cv2.LINE_AA)
+
+            # Inner filled dot (shrinking)
+            inner_r = max(1, int(5 * alpha))
+            cv2.circle(overlay, (cx, cy), inner_r, color, -1, cv2.LINE_AA)
+
+            # Type label (visible for first half of duration)
+            if progress < 0.5:
+                label = bounce.type.value
+                (tw, _), _ = cv2.getTextSize(label, _FONT_SMALL, 1.0, 1)
+                tx = cx - tw // 2
+                ty = cy - radius - 6
+                cv2.putText(
+                    overlay, label, (tx, ty),
+                    _FONT_SMALL, 1.0, color, 1, cv2.LINE_AA,
+                )
+
+        # Blend overlay onto frame
+        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+
     def draw_frame_number(self, frame: np.ndarray, frame_id: int) -> None:
         """Draw frame number in the top-left corner."""
         text = f"Frame: {frame_id}"
@@ -252,6 +325,7 @@ class FrameAnnotator:
         calibration: CourtCalibration | None = None,
         shot: Shot | None = None,
         stats: dict[str, str | int | float] | None = None,
+        active_bounces: list[tuple[Bounce, float]] | None = None,
     ) -> np.ndarray:
         """One-stop method: apply all annotations and return the frame.
 
@@ -263,6 +337,7 @@ class FrameAnnotator:
             calibration: Court calibration for line overlay (optional).
             shot: Active shot event to display label (optional).
             stats: Stats dict to render in panel (optional).
+            active_bounces: List of (Bounce, progress) for impact marks (optional).
 
         Returns:
             The annotated frame.
@@ -272,6 +347,7 @@ class FrameAnnotator:
         self.draw_player_bboxes(frame, player_frames)
         self.draw_pose_keypoints(frame, player_frames)
         self.draw_ball(frame, ball_frame)
+        self.draw_bounce_impacts(frame, active_bounces or [], calibration)
         self.draw_shot_label(frame, shot, ball_frame)
         self.draw_mini_court(frame, player_frames, ball_frame)
         if stats:

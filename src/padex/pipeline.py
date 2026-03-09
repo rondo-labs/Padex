@@ -143,9 +143,29 @@ class Padex:
                 s.shot_id, s.player_id, s.shot_type.value, s.confidence, s.timestamp_ms,
             )
 
+        # Filter bounces that overlap with shot contacts (within 200ms)
+        # These are racket hits misdetected as bounces
+        contact_times = [s.timestamp_ms for s in shots]
+        contact_overlap_ms = 200.0
+        filtered_bounces = [
+            b for b in bounces
+            if b.timestamp_ms is None
+            or not any(
+                abs(b.timestamp_ms - ct) < contact_overlap_ms
+                for ct in contact_times
+            )
+        ]
+        if len(filtered_bounces) < len(bounces):
+            logger.info(
+                "Filtered %d false bounces near shot contacts (%d → %d)",
+                len(bounces) - len(filtered_bounces),
+                len(bounces),
+                len(filtered_bounces),
+            )
+
         return PadexResult(
             tracking=tracking,
-            bounces=bounces,
+            bounces=filtered_bounces,
             shots=shots,
             calibration=tracking.calibration,
         )
@@ -234,12 +254,28 @@ class Padex:
         with VideoReader(self.video_path) as reader:
             fps = reader.fps
             w, h = reader.frame_size
+            bounce_display_frames = int(fps)  # ~1 second
+
+            # Pre-compute bounce → frame_id mapping
+            bounce_events: list[tuple[int, object]] = []
+            for b in result.bounces:
+                if b.timestamp_ms is not None:
+                    b_frame = round(b.timestamp_ms / (1000.0 / fps))
+                    bounce_events.append((b_frame, b))
 
             with VideoWriter(output_path, fps=fps, frame_size=(w, h)) as writer:
                 for frame_id, timestamp_ms, frame in reader.frames():
                     player_frames_here = player_lookup.get(frame_id, [])
                     ball_frame_here = ball_lookup.get(frame_id)
                     active_shot = get_active_shot(timestamp_ms)
+
+                    # Collect active bounces with fade progress
+                    active_bounces = []
+                    for b_frame, bounce in bounce_events:
+                        elapsed = frame_id - b_frame
+                        if 0 <= elapsed < bounce_display_frames:
+                            progress = elapsed / bounce_display_frames
+                            active_bounces.append((bounce, progress))
 
                     stats = {"Frame": frame_id, "Shots": len(result.shots)}
                     for shot_type, count in sorted(
@@ -255,6 +291,7 @@ class Padex:
                         calibration=result.calibration,
                         shot=active_shot,
                         stats=stats,
+                        active_bounces=active_bounces,
                     )
                     writer.write(frame)
 

@@ -218,3 +218,4 @@ output/
 # Annotation data (frames, training data — too large for git)
 data/
 
+.DS_Store

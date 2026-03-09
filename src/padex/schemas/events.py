@@ -56,6 +56,15 @@ class BounceType(str, Enum):
     NET = "net"
 
 
+class BallEventType(str, Enum):
+    """Per-frame ball event state for ML-based detection."""
+
+    FLYING = "flying"
+    BOUNCE = "bounce"
+    HIT = "hit"
+    OCCLUDED = "occluded"
+
+
 class ShotOutcome(str, Enum):
     """How the shot resolved."""
 

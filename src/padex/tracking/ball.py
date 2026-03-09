@@ -326,23 +326,36 @@ class TrackNetBallDetectionStrategy(BallDetectionStrategy):
         scale_x = w_orig / self.INFER_W
         scale_y = h_orig / self.INFER_H
 
-        # Normalize to 0-255 and threshold
-        feature = (heatmap.astype(np.float32) / heatmap.max() * 255).astype(np.uint8) if heatmap.max() > 0 else heatmap
-        _, binary = cv2.threshold(feature, self.HEATMAP_THRESHOLD, 255, cv2.THRESH_BINARY)
-
-        circles = cv2.HoughCircles(
-            binary,
-            cv2.HOUGH_GRADIENT,
-            dp=1, minDist=1,
-            param1=50, param2=2,
-            minRadius=2, maxRadius=7,
-        )
-
-        if circles is None or len(circles[0]) != 1:
+        if heatmap.max() == 0:
             return None, None, 0.0
 
-        cx, cy, _ = circles[0][0]
-        confidence = float(heatmap[int(cy), int(cx)]) / 255.0
+        # Normalize to 0-255 and threshold
+        feature = (heatmap.astype(np.float32) / heatmap.max() * 255).astype(np.uint8)
+        _, binary = cv2.threshold(feature, self.HEATMAP_THRESHOLD, 255, cv2.THRESH_BINARY)
+
+        # Find connected components and use the largest blob's centroid
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            binary, connectivity=8
+        )
+
+        if num_labels <= 1:
+            # No foreground blob found
+            return None, None, 0.0
+
+        # Skip label 0 (background), find largest foreground component
+        fg_areas = stats[1:, cv2.CC_STAT_AREA]
+        best_label = int(np.argmax(fg_areas)) + 1  # +1 to skip background
+
+        # Filter out blobs that are too large (likely noise)
+        if fg_areas[best_label - 1] > 200:
+            return None, None, 0.0
+
+        cx, cy = centroids[best_label]
+
+        # Confidence from peak heatmap value in the blob region
+        blob_mask = labels == best_label
+        confidence = float(heatmap[blob_mask].max()) / 255.0
+
         return float(cx * scale_x), float(cy * scale_y), confidence
 
     def reset(self) -> None:
@@ -622,6 +635,27 @@ class BallDetector:
             position=None,
             confidence=raw.confidence if raw else 0.0,
             visibility=BallVisibility.VISIBLE if raw else BallVisibility.OCCLUDED,
+        )
+
+    def detect_and_track_single(
+        self,
+        frame: np.ndarray,
+        frame_id: int,
+        timestamp_ms: float,
+    ) -> BallFrame:
+        """Detect and track ball in a single frame (streaming mode).
+
+        Uses the Kalman tracker for cross-frame state. Call frames in order.
+        """
+        raw = self.detection_strategy.detect(frame, frame_id, timestamp_ms)
+        position, visibility = self.tracker.update(raw, timestamp_ms)
+        return BallFrame(
+            frame_id=frame_id,
+            timestamp_ms=timestamp_ms,
+            bbox=raw.bbox if raw else None,
+            position=position,
+            confidence=raw.confidence if raw else 0.0,
+            visibility=visibility,
         )
 
     def track(

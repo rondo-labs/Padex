@@ -13,14 +13,19 @@ from __future__ import annotations
 
 import abc
 import logging
+from collections import defaultdict
+from pathlib import Path
 
 import numpy as np
+import torch
+import torch.nn as nn
 
-from padex.schemas.events import Bounce, BounceType
+from padex.schemas.events import BallEventType, Bounce, BounceType
 from padex.schemas.tracking import (
     BallFrame,
     BallVisibility,
     CourtCalibration,
+    PlayerFrame,
     Position2D,
     Position3D,
 )
@@ -294,3 +299,230 @@ class BounceDetector:
 
         pts = np.array(positions)
         return pts[-1] - pts[0]
+
+
+# ---------------------------------------------------------------------------
+# Feature extraction for ML-based event detection
+# ---------------------------------------------------------------------------
+
+# Feature indices for the 8-dimensional per-frame feature vector
+_FEAT_DIM = 8
+_DEFAULT_WINDOW = 4  # frames before/after center → 9 frames total
+
+
+def _nearest_player_distance(
+    ball_pos: Position2D | Position3D,
+    player_frames_at: list[PlayerFrame],
+) -> float:
+    """Compute distance to nearest player (meters). Returns 99.0 if none."""
+    min_dist = 99.0
+    for pf in player_frames_at:
+        if pf.position is None:
+            continue
+        dx = ball_pos.x - pf.position.x
+        dy = ball_pos.y - pf.position.y
+        dist = float(np.sqrt(dx * dx + dy * dy))
+        if dist < min_dist:
+            min_dist = dist
+    return min_dist
+
+
+def _build_player_lookup(
+    player_frames: list[PlayerFrame],
+) -> dict[int, list[PlayerFrame]]:
+    """Build frame_id → player_frames lookup (once, O(M))."""
+    lookup: dict[int, list[PlayerFrame]] = defaultdict(list)
+    for pf in player_frames:
+        lookup[pf.frame_id].append(pf)
+    return lookup
+
+
+def extract_event_features(
+    ball_frames: list[BallFrame],
+    player_frames: list[PlayerFrame],
+    center_idx: int,
+    window: int = _DEFAULT_WINDOW,
+    player_lookup: dict[int, list[PlayerFrame]] | None = None,
+) -> np.ndarray | None:
+    """Extract feature vector for a single frame (center of window).
+
+    Returns a flat array of shape (window_size * _FEAT_DIM,) or None
+    if the center frame has no position.
+    """
+    n = len(ball_frames)
+    window_size = 2 * window + 1
+
+    if player_lookup is None:
+        player_lookup = _build_player_lookup(player_frames)
+
+    features = np.zeros((window_size, _FEAT_DIM), dtype=np.float32)
+
+    for offset in range(-window, window + 1):
+        idx = center_idx + offset
+        slot = offset + window  # 0-based index in the feature array
+
+        if idx < 0 or idx >= n:
+            continue
+
+        bf = ball_frames[idx]
+        if bf.position is None:
+            continue
+
+        # Position
+        features[slot, 0] = bf.position.x
+        features[slot, 1] = bf.position.y
+
+        # Velocity (diff with previous frame)
+        if idx > 0 and ball_frames[idx - 1].position is not None:
+            prev = ball_frames[idx - 1].position
+            features[slot, 2] = bf.position.x - prev.x
+            features[slot, 3] = bf.position.y - prev.y
+
+        # Confidence
+        features[slot, 4] = bf.confidence
+
+        # Visibility (1 = visible, 0 = other)
+        features[slot, 5] = 1.0 if bf.visibility == BallVisibility.VISIBLE else 0.0
+
+        # Nearest player distance
+        features[slot, 6] = _nearest_player_distance(
+            bf.position, player_lookup.get(bf.frame_id, [])
+        )
+
+        # Speed magnitude
+        features[slot, 7] = float(
+            np.sqrt(features[slot, 2] ** 2 + features[slot, 3] ** 2)
+        )
+
+    return features.flatten()
+
+
+def extract_all_features(
+    ball_frames: list[BallFrame],
+    player_frames: list[PlayerFrame],
+    window: int = _DEFAULT_WINDOW,
+) -> np.ndarray:
+    """Extract features for all frames. Returns shape (N, window_size * _FEAT_DIM)."""
+    feat_dim = (2 * window + 1) * _FEAT_DIM
+    player_lookup = _build_player_lookup(player_frames)
+    result = np.zeros((len(ball_frames), feat_dim), dtype=np.float32)
+    for i in range(len(ball_frames)):
+        feat = extract_event_features(
+            ball_frames, player_frames, i, window, player_lookup
+        )
+        if feat is not None:
+            result[i] = feat
+    return result
+
+
+# ---------------------------------------------------------------------------
+# MLP model definition
+# ---------------------------------------------------------------------------
+
+
+class EventMLP(nn.Module):
+    """Lightweight MLP for ball event classification."""
+
+    NUM_CLASSES = 4  # flying, bounce, hit, occluded
+
+    def __init__(self, input_dim: int = 72, hidden1: int = 128, hidden2: int = 64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden1),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(hidden1, hidden2),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(hidden2, self.NUM_CLASSES),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+# ---------------------------------------------------------------------------
+# MLP-based event detection strategy
+# ---------------------------------------------------------------------------
+
+
+class MLPEventDetectionStrategy(BounceDetectionStrategy):
+    """Detects bounces (and hits) using a trained MLP model.
+
+    Falls back to VelocityBounceDetectionStrategy if no model is loaded.
+    """
+
+    def __init__(
+        self,
+        model_path: Path | None = None,
+        window: int = _DEFAULT_WINDOW,
+        bounce_threshold: float = 0.5,
+        hit_threshold: float = 0.5,
+        min_separation_frames: int = 8,
+    ) -> None:
+        self.window = window
+        self.bounce_threshold = bounce_threshold
+        self.hit_threshold = hit_threshold
+        self.min_separation_frames = min_separation_frames
+        self._model: EventMLP | None = None
+
+        if model_path is not None and model_path.exists():
+            self._load_model(model_path)
+
+    def _load_model(self, path: Path) -> None:
+        input_dim = (2 * self.window + 1) * _FEAT_DIM
+        self._model = EventMLP(input_dim=input_dim)
+        state = torch.load(path, map_location="cpu", weights_only=True)
+        self._model.load_state_dict(state)
+        self._model.eval()
+        logger.info("Loaded event detection MLP from %s", path)
+
+    def detect(self, ball_frames: list[BallFrame]) -> list[int]:
+        """Detect bounce frame indices (ignores hits). Requires player_frames."""
+        # Fallback: cannot run without player data via this interface
+        logger.warning(
+            "MLPEventDetectionStrategy.detect() called without player_frames, "
+            "falling back to velocity-based detection"
+        )
+        return VelocityBounceDetectionStrategy().detect(ball_frames)
+
+    def detect_events(
+        self,
+        ball_frames: list[BallFrame],
+        player_frames: list[PlayerFrame],
+    ) -> tuple[list[int], list[int]]:
+        """Detect bounce and hit frame indices.
+
+        Returns:
+            (bounce_indices, hit_indices) — lists of ball_frames indices.
+        """
+        if self._model is None:
+            logger.warning("No MLP model loaded, falling back to rules")
+            bounce_idx = VelocityBounceDetectionStrategy().detect(ball_frames)
+            return bounce_idx, []
+
+        features = extract_all_features(ball_frames, player_frames, self.window)
+        X = torch.from_numpy(features)
+
+        with torch.no_grad():
+            logits = self._model(X)
+            probs = torch.softmax(logits, dim=1).numpy()
+
+        # Class indices: 0=flying, 1=bounce, 2=hit, 3=occluded
+        bounce_raw = [
+            i for i in range(len(ball_frames))
+            if probs[i, 1] > self.bounce_threshold
+        ]
+        hit_raw = [
+            i for i in range(len(ball_frames))
+            if probs[i, 2] > self.hit_threshold
+        ]
+
+        bounce_idx = VelocityBounceDetectionStrategy._merge_nearby(
+            bounce_raw, self.min_separation_frames
+        )
+        hit_idx = VelocityBounceDetectionStrategy._merge_nearby(
+            hit_raw, self.min_separation_frames
+        )
+
+        return bounce_idx, hit_idx
