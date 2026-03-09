@@ -363,6 +363,256 @@ class TrackNetBallDetectionStrategy(BallDetectionStrategy):
 
 
 # ---------------------------------------------------------------------------
+# TrackNet V3 model definition
+# ---------------------------------------------------------------------------
+
+
+def _build_tracknet_v3(in_dim: int = 9, out_dim: int = 3) -> "torch.nn.Module":
+    """Build the TrackNet V3 architecture (U-Net with skip connections).
+
+    Architecture (from qaz812345/TrackNetV3):
+      Encoder:
+        down_block_1: Double2DConv(in_dim → 64)  + MaxPool
+        down_block_2: Double2DConv(64 → 128)     + MaxPool
+        down_block_3: Triple2DConv(128 → 256)    + MaxPool
+        bottleneck:   Triple2DConv(256 → 512)
+      Decoder (Upsample + concat skip connections):
+        up_block_1: Triple2DConv(512+256=768 → 256) + Upsample
+        up_block_2: Double2DConv(256+128=384 → 128) + Upsample
+        up_block_3: Double2DConv(128+64=192 → 64)
+        predictor: Conv2d(64 → out_dim) + Sigmoid
+
+    Input:  (B, 9, 288, 512)   — 3 frames × RGB stacked
+    Output: (B, 3, 288, 512)   — per-frame ball heatmap (sigmoid)
+    """
+    import torch
+    import torch.nn as nn
+
+    class _Conv2DBlock(nn.Module):
+        def __init__(self, in_ch: int, out_ch: int) -> None:
+            super().__init__()
+            self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding="same", bias=False)
+            self.bn = nn.BatchNorm2d(out_ch)
+            self.relu = nn.ReLU()
+
+        def forward(self, x: "torch.Tensor") -> "torch.Tensor":
+            return self.relu(self.bn(self.conv(x)))
+
+    class _Double2DConv(nn.Module):
+        def __init__(self, in_ch: int, out_ch: int) -> None:
+            super().__init__()
+            self.conv_1 = _Conv2DBlock(in_ch, out_ch)
+            self.conv_2 = _Conv2DBlock(out_ch, out_ch)
+
+        def forward(self, x: "torch.Tensor") -> "torch.Tensor":
+            return self.conv_2(self.conv_1(x))
+
+    class _Triple2DConv(nn.Module):
+        def __init__(self, in_ch: int, out_ch: int) -> None:
+            super().__init__()
+            self.conv_1 = _Conv2DBlock(in_ch, out_ch)
+            self.conv_2 = _Conv2DBlock(out_ch, out_ch)
+            self.conv_3 = _Conv2DBlock(out_ch, out_ch)
+
+        def forward(self, x: "torch.Tensor") -> "torch.Tensor":
+            return self.conv_3(self.conv_2(self.conv_1(x)))
+
+    class TrackNetV3(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.down_block_1 = _Double2DConv(in_dim, 64)
+            self.down_block_2 = _Double2DConv(64, 128)
+            self.down_block_3 = _Triple2DConv(128, 256)
+            self.bottleneck = _Triple2DConv(256, 512)
+            self.up_block_1 = _Triple2DConv(768, 256)
+            self.up_block_2 = _Double2DConv(384, 128)
+            self.up_block_3 = _Double2DConv(192, 64)
+            self.predictor = nn.Conv2d(64, out_dim, kernel_size=(1, 1))
+            self.sigmoid = nn.Sigmoid()
+
+        def forward(self, x: "torch.Tensor") -> "torch.Tensor":
+            x1 = self.down_block_1(x)
+            x = nn.MaxPool2d((2, 2), stride=(2, 2))(x1)
+            x2 = self.down_block_2(x)
+            x = nn.MaxPool2d((2, 2), stride=(2, 2))(x2)
+            x3 = self.down_block_3(x)
+            x = nn.MaxPool2d((2, 2), stride=(2, 2))(x3)
+            x = self.bottleneck(x)
+            x = torch.cat([nn.Upsample(scale_factor=2)(x), x3], dim=1)
+            x = self.up_block_1(x)
+            x = torch.cat([nn.Upsample(scale_factor=2)(x), x2], dim=1)
+            x = self.up_block_2(x)
+            x = torch.cat([nn.Upsample(scale_factor=2)(x), x1], dim=1)
+            x = self.up_block_3(x)
+            x = self.predictor(x)
+            return self.sigmoid(x)
+
+    return TrackNetV3()
+
+
+# ---------------------------------------------------------------------------
+# TrackNet V3 ball detection strategy
+# ---------------------------------------------------------------------------
+
+
+class TrackNetV3BallDetectionStrategy(BallDetectionStrategy):
+    """Ball detection using TrackNet V3: U-Net with skip connections.
+
+    V3 improvements over V2:
+    - Skip connections in decoder (better small-target localization)
+    - 3-channel sigmoid output (simpler than 256-class softmax)
+    - Weighted BCE + Focal Loss training (better class imbalance handling)
+
+    Input:  9-channel (3 RGB frames), resized to 512×288
+    Output: 3-channel sigmoid heatmap; channel 2 = current frame detection
+    """
+
+    INFER_W: int = 512
+    INFER_H: int = 288
+    HEATMAP_THRESHOLD: float = 0.5  # sigmoid output in [0, 1]
+    MAX_BLOB_AREA: int = 200
+    SEQ_LEN: int = 8  # number of target frames (checkpoint param_dict: seq_len=8)
+    # bg_mode='concat': input = [bg_frame, frame_1, ..., frame_8] = 9 frames = 27 channels
+
+    def __init__(
+        self,
+        model_path: str | None = None,
+        device: str | None = None,
+    ) -> None:
+        if model_path is None:
+            from padex.weights import get_weight_path
+
+            model_path = str(get_weight_path("ball_detection_TrackNetV3.pt"))
+        self.model_path = model_path
+        self._device_str = device
+        self._model = None
+        self._frame_buffer: list[np.ndarray] = []  # stores up to SEQ_LEN+1 frames
+        self._bg_frame: np.ndarray | None = None   # background = first seen frame
+
+    def _ensure_model(self) -> None:
+        if self._model is not None:
+            return
+        import torch
+
+        device = self._device_str or self._auto_device()
+        self._torch_device = torch.device(device)
+
+        # in_dim=27: (SEQ_LEN+1)*3 channels; out_dim=SEQ_LEN: one heatmap per target frame
+        model = _build_tracknet_v3(in_dim=(self.SEQ_LEN + 1) * 3, out_dim=self.SEQ_LEN)
+        state = torch.load(self.model_path, map_location="cpu", weights_only=False)
+        # Support both raw state_dict and wrapped checkpoints
+        if isinstance(state, dict) and "model" in state:
+            state = state["model"]
+        elif isinstance(state, dict) and "model_state_dict" in state:
+            state = state["model_state_dict"]
+        elif isinstance(state, dict) and "state_dict" in state:
+            state = state["state_dict"]
+        model.load_state_dict(state)
+        model.eval()
+        model.to(self._torch_device)
+        self._model = model
+        logger.info("TrackNet V3 loaded on %s", device)
+
+    @staticmethod
+    def _auto_device() -> str:
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                return "cuda"
+            if torch.backends.mps.is_available():
+                return "mps"
+        except Exception:
+            pass
+        return "cpu"
+
+    def detect(
+        self, frame: np.ndarray, frame_id: int, timestamp_ms: float
+    ) -> RawBallDetection | None:
+        self._ensure_model()
+        import torch
+
+        resized = cv2.resize(frame, (self.INFER_W, self.INFER_H))
+
+        # Store first frame as static background approximation
+        if self._bg_frame is None:
+            self._bg_frame = resized
+
+        self._frame_buffer.append(resized)
+        if len(self._frame_buffer) > self.SEQ_LEN:
+            self._frame_buffer.pop(0)
+
+        # Need SEQ_LEN frames to run inference
+        if len(self._frame_buffer) < self.SEQ_LEN:
+            return None
+
+        # Input: [bg_frame, frame_1, ..., frame_SEQ_LEN] stacked as 27 channels
+        all_frames = [self._bg_frame] + self._frame_buffer
+        imgs = np.concatenate(all_frames, axis=2).astype(np.float32) / 255.0
+        tensor = torch.from_numpy(imgs.transpose(2, 0, 1)).unsqueeze(0)
+        tensor = tensor.to(self._torch_device)
+
+        with torch.no_grad():
+            out = self._model(tensor)  # (1, SEQ_LEN, 288, 512)
+
+        # Last channel = current (newest) frame heatmap
+        heatmap = out[0, -1].cpu().numpy()  # (288, 512), values in [0, 1]
+
+        x_pred, y_pred, confidence = self._postprocess(heatmap, frame.shape)
+        if x_pred is None:
+            return None
+
+        h_orig, w_orig = frame.shape[:2]
+        r = 4
+        return RawBallDetection(
+            bbox=BoundingBox(
+                x1=float(x_pred - r), y1=float(y_pred - r),
+                x2=float(x_pred + r), y2=float(y_pred + r),
+            ),
+            confidence=float(confidence),
+            frame_id=frame_id,
+            timestamp_ms=timestamp_ms,
+        )
+
+    def _postprocess(
+        self,
+        heatmap: np.ndarray,
+        orig_shape: tuple,
+    ) -> tuple[float | None, float | None, float]:
+        """Extract ball center from sigmoid heatmap. Returns (x, y, conf) in original pixels."""
+        h_orig, w_orig = orig_shape[:2]
+        scale_x = w_orig / self.INFER_W
+        scale_y = h_orig / self.INFER_H
+
+        if heatmap.max() < self.HEATMAP_THRESHOLD:
+            return None, None, 0.0
+
+        binary = (heatmap >= self.HEATMAP_THRESHOLD).astype(np.uint8) * 255
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            binary, connectivity=8
+        )
+
+        if num_labels <= 1:
+            return None, None, 0.0
+
+        fg_areas = stats[1:, cv2.CC_STAT_AREA]
+        best_label = int(np.argmax(fg_areas)) + 1
+
+        if fg_areas[best_label - 1] > self.MAX_BLOB_AREA:
+            return None, None, 0.0
+
+        cx, cy = centroids[best_label]
+        blob_mask = labels == best_label
+        confidence = float(heatmap[blob_mask].max())
+
+        return float(cx * scale_x), float(cy * scale_y), confidence
+
+    def reset(self) -> None:
+        self._frame_buffer.clear()
+        self._bg_frame = None
+
+
+# ---------------------------------------------------------------------------
 # SAHI + YOLO ball detection strategy
 # ---------------------------------------------------------------------------
 
@@ -606,9 +856,14 @@ class BallDetector:
         model_path: str | None = None,
         confidence_threshold: float = 0.25,
         use_tracknet: bool = True,
+        use_tracknet_v3: bool = False,
     ) -> None:
         if detection_strategy is not None:
             self.detection_strategy = detection_strategy
+        elif use_tracknet_v3:
+            self.detection_strategy = TrackNetV3BallDetectionStrategy(
+                model_path=model_path,
+            )
         elif use_tracknet:
             self.detection_strategy = TrackNetBallDetectionStrategy(
                 model_path=model_path,

@@ -57,6 +57,14 @@ def main() -> None:
                 sys.exit(1)
             calibration = video.with_name(video.stem + "_calibration.json")
 
+    # Resolve V3 weights (local assets/weights/ takes priority over ~/.padex/)
+    v3_weights = PROJECT_ROOT / "assets" / "weights" / "TrackNetV3_best.pt"
+    use_v3 = v3_weights.exists()
+    if use_v3:
+        logger.info("Using TrackNet V3 weights: %s", v3_weights)
+    else:
+        logger.info("TrackNet V3 weights not found, falling back to V2")
+
     # Run tracking only (no pose → much faster)
     try:
         padex = Padex(
@@ -64,6 +72,8 @@ def main() -> None:
             calibration=calibration,
             enable_pose=False,
             cache_dir=PROJECT_ROOT / "output",
+            use_tracknet_v3=use_v3,
+            ball_model_path=v3_weights if use_v3 else None,
         )
         logger.info("Padex initialized. Starting tracking...")
 

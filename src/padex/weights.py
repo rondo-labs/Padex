@@ -29,6 +29,7 @@ WEIGHT_REGISTRY: dict[str, str] = {
     "yolo26m.pt": f"{GITHUB_RELEASE_BASE}/yolo26m.pt",
     "yolo26m-pose.pt": f"{GITHUB_RELEASE_BASE}/yolo26m-pose.pt",
     "ball_detection_TrackNet.pt": f"{GITHUB_RELEASE_BASE}/ball_detection_TrackNet.pt",
+    "ball_detection_TrackNetV3.pt": f"{GITHUB_RELEASE_BASE}/ball_detection_TrackNetV3.pt",
 }
 
 

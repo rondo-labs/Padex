@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from padex.schemas.tracking import BallFrame, CourtCalibration, PlayerFrame
-from padex.tracking.ball import BallDetector, SahiYoloBallDetectionStrategy
+from padex.tracking.ball import BallDetector, SahiYoloBallDetectionStrategy, TrackNetV3BallDetectionStrategy
 from padex.tracking.court import CourtDetector
 from padex.tracking.device import detect_device
 from padex.tracking.player import (
@@ -57,6 +57,8 @@ class TrackingPipeline:
         device: str | None = None,
         manual_calibration: CourtCalibration | None = None,
         enable_pose: bool = False,
+        use_tracknet_v3: bool = False,
+        ball_model_path: str | None = None,
     ) -> None:
         self.video_path = Path(video_path)
         self.device = device or detect_device()
@@ -72,7 +74,9 @@ class TrackingPipeline:
             pose_strategy=pose_strategy,
         )
         self.ball_detector = ball_detector or BallDetector(
-            use_tracknet=True,
+            use_tracknet=not use_tracknet_v3,
+            use_tracknet_v3=use_tracknet_v3,
+            model_path=ball_model_path,
         )
         self.calibration_sample_step = calibration_sample_step
         self.manual_calibration = manual_calibration

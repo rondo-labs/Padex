@@ -68,6 +68,8 @@ class Padex:
         enable_pose: bool = True,
         cache_tracking: bool = True,
         cache_dir: str | Path | None = None,
+        use_tracknet_v3: bool = False,
+        ball_model_path: str | Path | None = None,
     ) -> None:
         self.video_path = Path(video_path)
         if not self.video_path.exists():
@@ -76,6 +78,8 @@ class Padex:
         self.enable_pose = enable_pose
         self.cache_tracking = cache_tracking
         self.cache_dir = Path(cache_dir) if cache_dir else self.video_path.parent
+        self.use_tracknet_v3 = use_tracknet_v3
+        self.ball_model_path = str(ball_model_path) if ball_model_path else None
 
         self._calibration = self._resolve_calibration(calibration)
 
@@ -189,6 +193,8 @@ class Padex:
             video_path=self.video_path,
             enable_pose=self.enable_pose,
             manual_calibration=self._calibration,
+            use_tracknet_v3=self.use_tracknet_v3,
+            ball_model_path=self.ball_model_path,
         )
         tracking = pipeline.run()
         logger.info(
