@@ -231,6 +231,51 @@ class FrameAnnotator:
             y = 25 + i * line_h
             cv2.putText(frame, line, (15, y), _FONT, 0.5, (255, 255, 255), 1)
 
+    def draw_shot_panel(
+        self,
+        frame: np.ndarray,
+        shot: Shot | None,
+    ) -> None:
+        """Draw a semi-transparent shot info panel in the top-right corner."""
+        if shot is None:
+            return
+
+        w = frame.shape[1]
+
+        ts_s = shot.timestamp_ms / 1000.0
+        bounce_summary = (
+            ", ".join(b.type.value for b in shot.trajectory)
+            if shot.trajectory
+            else "none"
+        )
+        conf_pct = f"{shot.confidence * 100:.0f}%"
+
+        lines = [
+            ("SHOT", shot.shot_id),
+            ("hit", f"{ts_s:.2f}s"),
+            ("player", shot.player_id),
+            ("type", shot.shot_type.value),
+            ("conf", conf_pct),
+            ("bounces", bounce_summary),
+        ]
+
+        panel_w = 260
+        line_h = 22
+        panel_h = len(lines) * line_h + 20
+        x0 = w - panel_w - 5
+
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x0, 5), (x0 + panel_w, 5 + panel_h), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+
+        for i, (key, val) in enumerate(lines):
+            y = 25 + i * line_h
+            # Key in gray, value in white — same style as stats panel
+            key_str = f"{key}: "
+            (kw, _), _ = cv2.getTextSize(key_str, _FONT, 0.5, 1)
+            cv2.putText(frame, key_str, (x0 + 10, y), _FONT, 0.5, (180, 180, 180), 1)
+            cv2.putText(frame, val, (x0 + 10 + kw, y), _FONT, 0.5, (255, 255, 255), 1)
+
     def draw_shot_label(
         self,
         frame: np.ndarray,
@@ -349,6 +394,7 @@ class FrameAnnotator:
         self.draw_ball(frame, ball_frame)
         self.draw_bounce_impacts(frame, active_bounces or [], calibration)
         self.draw_shot_label(frame, shot, ball_frame)
+        self.draw_shot_panel(frame, shot)
         self.draw_mini_court(frame, player_frames, ball_frame)
         if stats:
             self.draw_stats_panel(frame, stats)
