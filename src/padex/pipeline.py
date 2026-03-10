@@ -70,6 +70,7 @@ class Padex:
         cache_dir: str | Path | None = None,
         use_tracknet_v3: bool = False,
         ball_model_path: str | Path | None = None,
+        event_model_path: str | Path | None = None,
     ) -> None:
         self.video_path = Path(video_path)
         if not self.video_path.exists():
@@ -80,6 +81,7 @@ class Padex:
         self.cache_dir = Path(cache_dir) if cache_dir else self.video_path.parent
         self.use_tracknet_v3 = use_tracknet_v3
         self.ball_model_path = str(ball_model_path) if ball_model_path else None
+        self.event_model_path = Path(event_model_path) if event_model_path else None
 
         self._calibration = self._resolve_calibration(calibration)
 
@@ -116,7 +118,7 @@ class Padex:
 
     def run(self) -> PadexResult:
         """Run the full pipeline: tracking -> bounce detection -> shot classification."""
-        from padex.events.bounce import BounceDetector
+        from padex.events.bounce import BounceDetector, MLPEventDetectionStrategy
         from padex.events.shot import PoseBasedShotTypeClassifier, ShotDetector
 
         # Stage 1: Tracking
@@ -124,10 +126,28 @@ class Padex:
 
         # Stage 2: Bounce detection
         logger.info("=== Stage 2: Bounce detection ===")
-        bounce_detector = BounceDetector()
-        bounces = bounce_detector.detect_bounces(
-            tracking.ball_frames, tracking.calibration
-        )
+        if self.event_model_path and self.event_model_path.exists():
+            logger.info("Using MLP event detector: %s", self.event_model_path)
+            mlp = MLPEventDetectionStrategy(model_path=self.event_model_path)
+            bounce_indices, hit_indices = mlp.detect_events(
+                tracking.ball_frames, tracking.player_frames
+            )
+            logger.info(
+                "MLP detected %d bounce candidates, %d hit candidates",
+                len(bounce_indices), len(hit_indices),
+            )
+            # Build Bounce objects from indices using geometry classifier
+            bounce_detector = BounceDetector()
+            bounces = bounce_detector.detect_bounces(
+                tracking.ball_frames, tracking.calibration,
+                precomputed_indices=bounce_indices,
+            )
+        else:
+            bounce_detector = BounceDetector()
+            bounces = bounce_detector.detect_bounces(
+                tracking.ball_frames, tracking.calibration
+            )
+            hit_indices = []
         logger.info("Detected %d bounces", len(bounces))
 
         # Stage 3: Shot detection + classification
@@ -311,6 +331,7 @@ class Padex:
 def process(
     video_path: str | Path,
     calibration: CourtCalibration | str | Path | None = None,
+    event_model_path: str | Path | None = None,
     **kwargs,
 ) -> PadexResult:
     """Convenience function: run the full Padex pipeline.
@@ -323,7 +344,7 @@ def process(
     Returns:
         PadexResult with tracking, bounces, and shots.
     """
-    return Padex(video_path, calibration=calibration, **kwargs).run()
+    return Padex(video_path, calibration=calibration, event_model_path=event_model_path, **kwargs).run()
 
 
 def export_video(

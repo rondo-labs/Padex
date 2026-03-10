@@ -236,9 +236,13 @@ class BounceDetector:
         self,
         ball_frames: list[BallFrame],
         court_calibration: CourtCalibration | None = None,
+        precomputed_indices: list[int] | None = None,
     ) -> list[Bounce]:
         """Identify and classify all bounce events in a ball trajectory."""
-        bounce_frame_indices = self.detection_strategy.detect(ball_frames)
+        if precomputed_indices is not None:
+            bounce_frame_indices = precomputed_indices
+        else:
+            bounce_frame_indices = self.detection_strategy.detect(ball_frames)
 
         bounces: list[Bounce] = []
         for idx in bounce_frame_indices:
