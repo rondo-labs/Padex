@@ -71,6 +71,7 @@ class Padex:
         use_tracknet_v3: bool = False,
         ball_model_path: str | Path | None = None,
         event_model_path: str | Path | None = None,
+        use_physics_events: bool = False,
     ) -> None:
         self.video_path = Path(video_path)
         if not self.video_path.exists():
@@ -82,6 +83,7 @@ class Padex:
         self.use_tracknet_v3 = use_tracknet_v3
         self.ball_model_path = str(ball_model_path) if ball_model_path else None
         self.event_model_path = Path(event_model_path) if event_model_path else None
+        self.use_physics_events = use_physics_events
 
         self._calibration = self._resolve_calibration(calibration)
 
@@ -118,7 +120,11 @@ class Padex:
 
     def run(self) -> PadexResult:
         """Run the full pipeline: tracking -> bounce detection -> shot classification."""
-        from padex.events.bounce import BounceDetector, MLPEventDetectionStrategy
+        from padex.events.bounce import (
+            BounceDetector,
+            MLPEventDetectionStrategy,
+            PhysicsEventDetectionStrategy,
+        )
         from padex.events.shot import PoseBasedShotTypeClassifier, ShotDetector
 
         # Stage 1: Tracking
@@ -126,7 +132,21 @@ class Padex:
 
         # Stage 2: Bounce detection
         logger.info("=== Stage 2: Bounce detection ===")
-        if self.event_model_path and self.event_model_path.exists():
+        if self.use_physics_events:
+            logger.info("Using physics-based (acceleration) event detector")
+            strategy = PhysicsEventDetectionStrategy()
+            bounce_indices, hit_indices = strategy.detect_events(
+                tracking.ball_frames, tracking.player_frames
+            )
+            logger.info(
+                "Physics detected %d bounce candidates, %d hit candidates",
+                len(bounce_indices), len(hit_indices),
+            )
+            bounces = BounceDetector().detect_bounces(
+                tracking.ball_frames, tracking.calibration,
+                precomputed_indices=bounce_indices,
+            )
+        elif self.event_model_path and self.event_model_path.exists():
             logger.info("Using MLP event detector: %s", self.event_model_path)
             mlp = MLPEventDetectionStrategy(model_path=self.event_model_path)
             bounce_indices, hit_indices = mlp.detect_events(
@@ -136,15 +156,12 @@ class Padex:
                 "MLP detected %d bounce candidates, %d hit candidates",
                 len(bounce_indices), len(hit_indices),
             )
-            # Build Bounce objects from indices using geometry classifier
-            bounce_detector = BounceDetector()
-            bounces = bounce_detector.detect_bounces(
+            bounces = BounceDetector().detect_bounces(
                 tracking.ball_frames, tracking.calibration,
                 precomputed_indices=bounce_indices,
             )
         else:
-            bounce_detector = BounceDetector()
-            bounces = bounce_detector.detect_bounces(
+            bounces = BounceDetector().detect_bounces(
                 tracking.ball_frames, tracking.calibration
             )
             hit_indices = []

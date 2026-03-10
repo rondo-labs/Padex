@@ -19,6 +19,8 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal import find_peaks
 
 from padex.schemas.events import BallEventType, Bounce, BounceType
 from padex.schemas.tracking import (
@@ -530,3 +532,169 @@ class MLPEventDetectionStrategy(BounceDetectionStrategy):
         )
 
         return bounce_idx, hit_idx
+
+
+# ---------------------------------------------------------------------------
+# Physics-based event detection (acceleration changepoint)
+# ---------------------------------------------------------------------------
+
+
+class PhysicsEventDetectionStrategy(BounceDetectionStrategy):
+    """Detects bounce and hit events via acceleration magnitude peaks.
+
+    Improvements over VelocityBounceDetectionStrategy:
+    - Detects ANY velocity change (not just direction reversals) → catches hits
+      where the ball direction doesn't reverse
+    - Uses actual timestamps for derivatives → robust to dropped / sparse frames
+    - Adaptive threshold (mean + z_score × std) → works across different videos
+    - Classifies hit vs bounce using nearest player distance
+
+    Args:
+        accel_z_score: Number of standard deviations above mean for the
+            acceleration threshold. Lower → more sensitive. Default 1.8.
+        min_separation_frames: Minimum gap between consecutive events (in
+            original ball_frames indices). Default 8.
+        min_confidence: Minimum ball detection confidence to include a frame.
+        hit_proximity_m: Ball-to-player distance (meters) below which an event
+            is classified as a hit rather than a bounce. Default 1.5.
+    """
+
+    def __init__(
+        self,
+        accel_z_score: float = 1.8,
+        min_separation_frames: int = 8,
+        min_confidence: float = 0.1,
+        hit_proximity_m: float = 1.5,
+    ) -> None:
+        self.accel_z_score = accel_z_score
+        self.min_separation_frames = min_separation_frames
+        self.min_confidence = min_confidence
+        self.hit_proximity_m = hit_proximity_m
+
+    # ------------------------------------------------------------------
+    # BounceDetectionStrategy ABC
+    # ------------------------------------------------------------------
+
+    def detect(self, ball_frames: list[BallFrame]) -> list[int]:
+        """Return bounce frame indices (no player proximity, pure kinematics)."""
+        bounce_idx, _ = self.detect_events(ball_frames, player_frames=[])
+        return bounce_idx
+
+    # ------------------------------------------------------------------
+    # Full event detection
+    # ------------------------------------------------------------------
+
+    def detect_events(
+        self,
+        ball_frames: list[BallFrame],
+        player_frames: list[PlayerFrame],
+    ) -> tuple[list[int], list[int]]:
+        """Detect bounce and hit frame indices.
+
+        Returns:
+            (bounce_indices, hit_indices) as lists of ball_frames indices.
+        """
+        visible = [
+            (i, bf)
+            for i, bf in enumerate(ball_frames)
+            if bf.visibility == BallVisibility.VISIBLE
+            and bf.position is not None
+            and bf.confidence >= self.min_confidence
+        ]
+
+        if len(visible) < 5:
+            return [], []
+
+        candidates = self._acceleration_candidates(visible)
+        if not candidates:
+            return [], []
+
+        player_lookup = _build_player_lookup(player_frames)
+
+        bounce_raw: list[int] = []
+        hit_raw: list[int] = []
+
+        for orig_idx in candidates:
+            bf = ball_frames[orig_idx]
+            if bf.position is None:
+                bounce_raw.append(orig_idx)
+                continue
+            dist = _nearest_player_distance(
+                bf.position, player_lookup.get(bf.frame_id, [])
+            )
+            if dist < self.hit_proximity_m:
+                hit_raw.append(orig_idx)
+            else:
+                bounce_raw.append(orig_idx)
+
+        bounce_idx = VelocityBounceDetectionStrategy._merge_nearby(
+            bounce_raw, self.min_separation_frames
+        )
+        hit_idx = VelocityBounceDetectionStrategy._merge_nearby(
+            hit_raw, self.min_separation_frames
+        )
+
+        logger.debug(
+            "PhysicsEventDetection: %d candidates → %d bounces, %d hits",
+            len(candidates), len(bounce_idx), len(hit_idx),
+        )
+        return bounce_idx, hit_idx
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _acceleration_candidates(
+        self, visible: list[tuple[int, BallFrame]]
+    ) -> list[int]:
+        """Find frames with large acceleration magnitude.
+
+        Returns original ball_frames indices.
+        """
+        orig_indices = [i for i, _ in visible]
+        t = np.array(
+            [bf.timestamp_ms / 1000.0 for _, bf in visible], dtype=np.float64
+        )
+        pos = np.array(
+            [[bf.position.x, bf.position.y] for _, bf in visible],
+            dtype=np.float64,
+        )
+
+        n = len(visible)
+
+        # Centered finite-difference velocity (m/s)
+        vel = np.zeros_like(pos)
+        for k in range(1, n - 1):
+            dt = t[k + 1] - t[k - 1]
+            if dt > 0:
+                vel[k] = (pos[k + 1] - pos[k - 1]) / dt
+        # Endpoints: one-sided
+        if t[1] - t[0] > 0:
+            vel[0] = (pos[1] - pos[0]) / (t[1] - t[0])
+        if t[-1] - t[-2] > 0:
+            vel[-1] = (pos[-1] - pos[-2]) / (t[-1] - t[-2])
+
+        # Acceleration magnitude
+        accel = np.diff(vel, axis=0)          # shape (n-1, 2)
+        accel_mag = np.linalg.norm(accel, axis=1).astype(np.float64)
+
+        # Smooth to avoid double-firing on sharp edges
+        accel_mag_smooth = gaussian_filter1d(accel_mag, sigma=1)
+
+        mean_a = float(accel_mag_smooth.mean())
+        std_a = float(accel_mag_smooth.std())
+
+        if std_a == 0:
+            return []
+
+        threshold = mean_a + self.accel_z_score * std_a
+        peaks, _ = find_peaks(
+            accel_mag_smooth,
+            height=threshold,
+            distance=self.min_separation_frames,
+        )
+
+        # Map visible-list indices → original ball_frames indices
+        # accel[k] corresponds to the transition between visible[k] and visible[k+1];
+        # attribute the event to visible[k+1] (the post-event frame)
+        return [orig_indices[min(int(p) + 1, n - 1)] for p in peaks]

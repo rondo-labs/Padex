@@ -61,11 +61,20 @@ def main() -> None:
                 sys.exit(1)
             calibration = video.with_name(video.stem + "_calibration.json")
 
+    # Resolve V3 weights
+    v3_weights = PROJECT_ROOT / "assets" / "weights" / "TrackNetV3_best.pt"
+    use_v3 = v3_weights.exists()
+    if use_v3:
+        logger.info("Using TrackNet V3 weights: %s", v3_weights)
+
     # Run pipeline
     padex = Padex(
         video_path=video,
         calibration=calibration,
         cache_dir=PROJECT_ROOT / "output",
+        use_tracknet_v3=use_v3,
+        ball_model_path=v3_weights if use_v3 else None,
+        use_physics_events=True,
     )
     result = padex.run()
 
